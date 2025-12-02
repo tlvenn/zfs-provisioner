@@ -1,0 +1,61 @@
+x-zfs:
+  parent: "tank/docker/stacks/myapp"
+  defaults:
+    compression: "zstd"
+  datasets:
+    # Simple form
+    redis:
+      quota: "5G"
+    # Nested form
+    postgres:
+      data:
+        quota: "50G"
+        recordsize: "16K"
+      wal:
+        quota: "10G"
+    app:
+      config:
+        quota: "1G"
+      data:
+        quota: "100G"
+      logs:
+        quota: "20G"
+        compression: "lz4"
+
+services:
+  zfs-provisioner:
+    image: zfs-provisioner:latest
+    privileged: true
+    volumes:
+      - /dev/zfs:/dev/zfs
+      - ./docker-compose.yml:/config/docker-compose.yml:ro
+    command: ["/config/docker-compose.yml"]
+
+  redis:
+    image: redis:7
+    depends_on:
+      zfs-provisioner:
+        condition: service_completed_successfully
+    volumes:
+      - /tank/docker/stacks/myapp/redis:/data
+
+  postgres:
+    image: postgres:16
+    depends_on:
+      zfs-provisioner:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - /tank/docker/stacks/myapp/postgres/data:/var/lib/postgresql/data
+      - /tank/docker/stacks/myapp/postgres/wal:/var/lib/postgresql/wal
+
+  app:
+    image: nginx:alpine
+    depends_on:
+      zfs-provisioner:
+        condition: service_completed_successfully
+    volumes:
+      - /tank/docker/stacks/myapp/app/config:/app/config
+      - /tank/docker/stacks/myapp/app/data:/app/data
+      - /tank/docker/stacks/myapp/app/logs:/app/logs
