@@ -8,43 +8,38 @@ ZFS Provisioner reads an `x-zfs` configuration block from your `docker-compose.y
 
 ## Usage
 
-### Docker Compose Configuration
+### Configuration Methods
 
-Add an `x-zfs` section to your compose file and include the provisioner as an init service:
+The provisioner supports two configuration methods:
+
+1. **Environment variable** (recommended for Portainer) - via `ZFS_CONFIG`
+2. **File** - via command line argument
+
+### Method 1: Environment Variable (Recommended)
+
+Pass the configuration directly via the `ZFS_CONFIG` environment variable. This works seamlessly with Portainer:
 
 ```yaml
-x-zfs:
-  parent: "tank/docker/stacks/myapp"
-  defaults:
-    compression: "zstd"
-  datasets:
-    # Simple form: single volume
-    redis:
-      quota: "5G"
-    # Nested form: multiple volumes per service
-    postgres:
-      data:
-        quota: "50G"
-        recordsize: "16K"
-      wal:
-        quota: "10G"
-    app:
-      config:
-        quota: "1G"
-      data:
-        quota: "100G"
-      logs:
-        quota: "20G"
-        compression: "lz4"
-
 services:
   zfs-provisioner:
-    image: zfs-provisioner:latest
+    image: ghcr.io/tlvenn/zfs-provisioner:latest
     privileged: true
     volumes:
       - /dev/zfs:/dev/zfs
-      - ./docker-compose.yml:/config/docker-compose.yml:ro
-    command: ["/config/docker-compose.yml"]
+    environment:
+      ZFS_CONFIG: |
+        parent: "tank/docker/stacks/myapp"
+        defaults:
+          compression: "zstd"
+        datasets:
+          redis:
+            quota: "5G"
+          postgres:
+            data:
+              quota: "50G"
+              recordsize: "16K"
+            wal:
+              quota: "10G"
 
   redis:
     image: redis:7
@@ -62,17 +57,24 @@ services:
     volumes:
       - /tank/docker/stacks/myapp/postgres/data:/var/lib/postgresql/data
       - /tank/docker/stacks/myapp/postgres/wal:/var/lib/postgresql/wal
-
-  app:
-    image: myapp:latest
-    depends_on:
-      zfs-provisioner:
-        condition: service_completed_successfully
-    volumes:
-      - /tank/docker/stacks/myapp/app/config:/app/config
-      - /tank/docker/stacks/myapp/app/data:/app/data
-      - /tank/docker/stacks/myapp/app/logs:/app/logs
 ```
+
+### Method 2: File
+
+Mount the compose file and pass the path as an argument:
+
+```yaml
+services:
+  zfs-provisioner:
+    image: ghcr.io/tlvenn/zfs-provisioner:latest
+    privileged: true
+    volumes:
+      - /dev/zfs:/dev/zfs
+      - ./docker-compose.yml:/config/docker-compose.yml:ro
+    command: ["/config/docker-compose.yml"]
+```
+
+Note: This requires the file to be accessible at the mount path, which may not work with Portainer git deployments.
 
 ### Schema
 
@@ -127,7 +129,11 @@ Creates: `{parent}/postgres/data` and `{parent}/postgres/wal`
 ### CLI Options
 
 ```
-Usage: zfs-provisioner [flags] <compose-file>
+Usage: zfs-provisioner [flags] [compose-file]
+
+Configuration can be provided via:
+  - ZFS_CONFIG environment variable (x-zfs content as YAML)
+  - File path as argument
 
 Flags:
   --dry-run    Show what would be created/updated without making changes

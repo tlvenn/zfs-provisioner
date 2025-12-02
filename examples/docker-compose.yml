@@ -1,35 +1,35 @@
-x-zfs:
-  parent: "tank/docker/stacks/myapp"
-  defaults:
-    compression: "zstd"
-  datasets:
-    # Simple form
-    redis:
-      quota: "5G"
-    # Nested form
-    postgres:
-      data:
-        quota: "50G"
-        recordsize: "16K"
-      wal:
-        quota: "10G"
-    app:
-      config:
-        quota: "1G"
-      data:
-        quota: "100G"
-      logs:
-        quota: "20G"
-        compression: "lz4"
-
 services:
   zfs-provisioner:
-    image: zfs-provisioner:latest
+    image: ghcr.io/tlvenn/zfs-provisioner:latest
     privileged: true
     volumes:
       - /dev/zfs:/dev/zfs
-      - ./docker-compose.yml:/config/docker-compose.yml:ro
-    command: ["/config/docker-compose.yml"]
+    environment:
+      ZFS_CONFIG: |
+        parent: "tank/docker/stacks/myapp"
+        defaults:
+          compression: "zstd"
+        datasets:
+          # Empty form: no custom properties
+          redis: {}
+          # Simple form: single volume with properties
+          cache:
+            quota: "5G"
+          # Nested form: multiple volumes per service
+          postgres:
+            data:
+              quota: "50G"
+              recordsize: "16K"
+            wal:
+              quota: "10G"
+          app:
+            config:
+              quota: "1G"
+            data:
+              quota: "100G"
+            logs:
+              quota: "20G"
+              compression: "lz4"
 
   redis:
     image: redis:7

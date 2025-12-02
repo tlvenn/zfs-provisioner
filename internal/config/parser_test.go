@@ -137,6 +137,56 @@ services:
 	}
 }
 
+func TestParseEnv(t *testing.T) {
+	envValue := `parent: "tank/docker/stacks/myapp"
+defaults:
+  compression: "zstd"
+datasets:
+  redis:
+    quota: "5G"
+  postgres:
+    data:
+      quota: "50G"`
+
+	cfg, err := ParseEnv(envValue)
+	if err != nil {
+		t.Fatalf("ParseEnv failed: %v", err)
+	}
+
+	if cfg.Parent != "tank/docker/stacks/myapp" {
+		t.Errorf("Parent = %q, want %q", cfg.Parent, "tank/docker/stacks/myapp")
+	}
+
+	if cfg.Defaults.Compression != "zstd" {
+		t.Errorf("Defaults.Compression = %q, want %q", cfg.Defaults.Compression, "zstd")
+	}
+
+	// Build a map for easier lookup
+	datasets := make(map[string]Dataset)
+	for _, ds := range cfg.Datasets {
+		datasets[ds.Name] = ds
+	}
+
+	// Check datasets
+	redis, ok := datasets["tank/docker/stacks/myapp/redis"]
+	if !ok {
+		t.Error("missing dataset: tank/docker/stacks/myapp/redis")
+	} else {
+		if redis.Properties.Quota != "5G" {
+			t.Errorf("redis.Quota = %q, want %q", redis.Properties.Quota, "5G")
+		}
+	}
+
+	pgData, ok := datasets["tank/docker/stacks/myapp/postgres/data"]
+	if !ok {
+		t.Error("missing dataset: tank/docker/stacks/myapp/postgres/data")
+	} else {
+		if pgData.Properties.Quota != "50G" {
+			t.Errorf("postgres/data.Quota = %q, want %q", pgData.Properties.Quota, "50G")
+		}
+	}
+}
+
 func TestParse_EmptyDataset(t *testing.T) {
 	yaml := `
 x-zfs:

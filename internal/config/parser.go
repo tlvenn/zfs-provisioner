@@ -46,6 +46,34 @@ func ParseFile(path string) (*Config, error) {
 	return Parse(data)
 }
 
+// ParseEnv parses x-zfs configuration from an environment variable value
+// The value should be the x-zfs content directly (not wrapped in x-zfs key)
+func ParseEnv(value string) (*Config, error) {
+	// Wrap the value in x-zfs key to reuse the existing parser
+	wrapped := "x-zfs:\n"
+	for _, line := range splitLines(value) {
+		wrapped += "  " + line + "\n"
+	}
+
+	return Parse([]byte(wrapped))
+}
+
+// splitLines splits a string into lines
+func splitLines(s string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			lines = append(lines, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	return lines
+}
+
 // Parse parses the x-zfs configuration from docker-compose YAML content
 func Parse(data []byte) (*Config, error) {
 	var raw map[string]interface{}
