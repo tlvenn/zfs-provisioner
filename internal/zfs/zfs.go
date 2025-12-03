@@ -117,6 +117,17 @@ func (c *Client) CreateDataset(name string, props config.ZFSProperties) error {
 		return fmt.Errorf("failed to create dataset: %s", stderr.String())
 	}
 
+	// Set ownership if uid or gid is specified
+	if props.UID != "" || props.GID != "" {
+		mountpoint, err := c.GetMountpoint(name)
+		if err != nil {
+			return err
+		}
+		if err := c.SetOwnership(mountpoint, props.UID, props.GID); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -184,6 +195,48 @@ func (c *Client) UpdateProperties(name string, desired config.ZFSProperties) ([]
 		updated = append(updated, fmt.Sprintf("reservation: %s -> %s", current.Reservation, desired.Reservation))
 	}
 
+	// Check and update ownership if uid or gid is specified
+	if desired.UID != "" || desired.GID != "" {
+		mountpoint, err := c.GetMountpoint(name)
+		if err != nil {
+			return updated, err
+		}
+
+		currentUID, currentGID, err := c.GetOwnership(mountpoint)
+		if err != nil {
+			return updated, err
+		}
+
+		needsUpdate := false
+		if desired.UID != "" && desired.UID != currentUID {
+			needsUpdate = true
+		}
+		if desired.GID != "" && desired.GID != currentGID {
+			needsUpdate = true
+		}
+
+		if needsUpdate {
+			if !c.dryRun {
+				if err := c.SetOwnership(mountpoint, desired.UID, desired.GID); err != nil {
+					return updated, err
+				}
+			}
+
+			// Build update message
+			oldOwnership := currentUID + ":" + currentGID
+			newUID := desired.UID
+			if newUID == "" {
+				newUID = currentUID
+			}
+			newGID := desired.GID
+			if newGID == "" {
+				newGID = currentGID
+			}
+			newOwnership := newUID + ":" + newGID
+			updated = append(updated, fmt.Sprintf("ownership: %s -> %s", oldOwnership, newOwnership))
+		}
+	}
+
 	return updated, nil
 }
 
@@ -191,4 +244,81 @@ func (c *Client) UpdateProperties(name string, desired config.ZFSProperties) ([]
 func normalizeSize(s string) string {
 	// For now, just lowercase and trim - could expand to handle byte conversion
 	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// GetMountpoint returns the mountpoint path for a dataset
+func (c *Client) GetMountpoint(name string) (string, error) {
+	cmd := exec.Command("zfs", "get", "-H", "-o", "value", "mountpoint", name)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to get mountpoint: %s", stderr.String())
+	}
+
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// GetOwnership returns the current uid and gid of a mountpoint
+func (c *Client) GetOwnership(mountpoint string) (uid, gid string, err error) {
+	// Use stat to get ownership - format differs by OS
+	// On Linux: stat -c '%u:%g' <path>
+	// On macOS/BSD: stat -f '%u:%g' <path>
+	var cmd *exec.Cmd
+
+	// Try Linux format first, fall back to BSD format
+	cmd = exec.Command("stat", "-c", "%u:%g", mountpoint)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		// Try BSD/macOS format
+		cmd = exec.Command("stat", "-f", "%u:%g", mountpoint)
+		stdout.Reset()
+		stderr.Reset()
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			return "", "", fmt.Errorf("failed to get ownership: %s", stderr.String())
+		}
+	}
+
+	parts := strings.Split(strings.TrimSpace(stdout.String()), ":")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("unexpected stat output: %s", stdout.String())
+	}
+
+	return parts[0], parts[1], nil
+}
+
+// SetOwnership sets the uid:gid ownership on a mountpoint recursively
+func (c *Client) SetOwnership(mountpoint, uid, gid string) error {
+	if c.dryRun {
+		return nil
+	}
+
+	var ownership string
+	if uid != "" && gid != "" {
+		ownership = uid + ":" + gid
+	} else if uid != "" {
+		ownership = uid
+	} else if gid != "" {
+		ownership = ":" + gid
+	} else {
+		// Nothing to set
+		return nil
+	}
+
+	cmd := exec.Command("chown", "-R", ownership, mountpoint)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to set ownership: %s", stderr.String())
+	}
+
+	return nil
 }

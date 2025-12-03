@@ -243,3 +243,189 @@ x-zfs:
 		}
 	}
 }
+
+func TestParse_UIDGIDDefaults(t *testing.T) {
+	yaml := `
+x-zfs:
+  parent: "tank/docker/stacks/myapp"
+  defaults:
+    compression: "zstd"
+    uid: "1000"
+    gid: "1000"
+  datasets:
+    redis: {}
+    cache:
+      quota: "5G"
+`
+
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Check defaults are parsed
+	if cfg.Defaults.UID != "1000" {
+		t.Errorf("Defaults.UID = %q, want %q", cfg.Defaults.UID, "1000")
+	}
+	if cfg.Defaults.GID != "1000" {
+		t.Errorf("Defaults.GID = %q, want %q", cfg.Defaults.GID, "1000")
+	}
+
+	// Build a map for easier lookup
+	datasets := make(map[string]Dataset)
+	for _, ds := range cfg.Datasets {
+		datasets[ds.Name] = ds
+	}
+
+	// Check empty dataset inherits uid/gid from defaults
+	redis, ok := datasets["tank/docker/stacks/myapp/redis"]
+	if !ok {
+		t.Error("missing dataset: tank/docker/stacks/myapp/redis")
+	} else {
+		if redis.Properties.UID != "1000" {
+			t.Errorf("redis.UID = %q, want %q (from defaults)", redis.Properties.UID, "1000")
+		}
+		if redis.Properties.GID != "1000" {
+			t.Errorf("redis.GID = %q, want %q (from defaults)", redis.Properties.GID, "1000")
+		}
+	}
+
+	// Check dataset with properties also inherits uid/gid
+	cache, ok := datasets["tank/docker/stacks/myapp/cache"]
+	if !ok {
+		t.Error("missing dataset: tank/docker/stacks/myapp/cache")
+	} else {
+		if cache.Properties.UID != "1000" {
+			t.Errorf("cache.UID = %q, want %q (from defaults)", cache.Properties.UID, "1000")
+		}
+		if cache.Properties.GID != "1000" {
+			t.Errorf("cache.GID = %q, want %q (from defaults)", cache.Properties.GID, "1000")
+		}
+		if cache.Properties.Quota != "5G" {
+			t.Errorf("cache.Quota = %q, want %q", cache.Properties.Quota, "5G")
+		}
+	}
+}
+
+func TestParse_UIDGIDOverride(t *testing.T) {
+	yaml := `
+x-zfs:
+  parent: "tank/docker/stacks/myapp"
+  defaults:
+    uid: "1000"
+    gid: "1000"
+  datasets:
+    redis: {}
+    postgres:
+      data:
+        quota: "50G"
+        uid: "999"
+        gid: "999"
+`
+
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Build a map for easier lookup
+	datasets := make(map[string]Dataset)
+	for _, ds := range cfg.Datasets {
+		datasets[ds.Name] = ds
+	}
+
+	// Check redis inherits defaults
+	redis, ok := datasets["tank/docker/stacks/myapp/redis"]
+	if !ok {
+		t.Error("missing dataset: tank/docker/stacks/myapp/redis")
+	} else {
+		if redis.Properties.UID != "1000" {
+			t.Errorf("redis.UID = %q, want %q (from defaults)", redis.Properties.UID, "1000")
+		}
+		if redis.Properties.GID != "1000" {
+			t.Errorf("redis.GID = %q, want %q (from defaults)", redis.Properties.GID, "1000")
+		}
+	}
+
+	// Check postgres/data overrides uid/gid
+	pgData, ok := datasets["tank/docker/stacks/myapp/postgres/data"]
+	if !ok {
+		t.Error("missing dataset: tank/docker/stacks/myapp/postgres/data")
+	} else {
+		if pgData.Properties.UID != "999" {
+			t.Errorf("postgres/data.UID = %q, want %q (override)", pgData.Properties.UID, "999")
+		}
+		if pgData.Properties.GID != "999" {
+			t.Errorf("postgres/data.GID = %q, want %q (override)", pgData.Properties.GID, "999")
+		}
+		if pgData.Properties.Quota != "50G" {
+			t.Errorf("postgres/data.Quota = %q, want %q", pgData.Properties.Quota, "50G")
+		}
+	}
+}
+
+func TestParse_UIDOnly(t *testing.T) {
+	yaml := `
+x-zfs:
+  parent: "tank/docker/stacks/myapp"
+  datasets:
+    redis:
+      uid: "1000"
+`
+
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Build a map for easier lookup
+	datasets := make(map[string]Dataset)
+	for _, ds := range cfg.Datasets {
+		datasets[ds.Name] = ds
+	}
+
+	redis, ok := datasets["tank/docker/stacks/myapp/redis"]
+	if !ok {
+		t.Error("missing dataset: tank/docker/stacks/myapp/redis")
+	} else {
+		if redis.Properties.UID != "1000" {
+			t.Errorf("redis.UID = %q, want %q", redis.Properties.UID, "1000")
+		}
+		if redis.Properties.GID != "" {
+			t.Errorf("redis.GID = %q, want empty", redis.Properties.GID)
+		}
+	}
+}
+
+func TestParse_GIDOnly(t *testing.T) {
+	yaml := `
+x-zfs:
+  parent: "tank/docker/stacks/myapp"
+  datasets:
+    redis:
+      gid: "1000"
+`
+
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Build a map for easier lookup
+	datasets := make(map[string]Dataset)
+	for _, ds := range cfg.Datasets {
+		datasets[ds.Name] = ds
+	}
+
+	redis, ok := datasets["tank/docker/stacks/myapp/redis"]
+	if !ok {
+		t.Error("missing dataset: tank/docker/stacks/myapp/redis")
+	} else {
+		if redis.Properties.UID != "" {
+			t.Errorf("redis.UID = %q, want empty", redis.Properties.UID)
+		}
+		if redis.Properties.GID != "1000" {
+			t.Errorf("redis.GID = %q, want %q", redis.Properties.GID, "1000")
+		}
+	}
+}

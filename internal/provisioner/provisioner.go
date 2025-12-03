@@ -123,6 +123,12 @@ func formatProperties(props config.ZFSProperties) string {
 	if props.Reservation != "" {
 		parts = append(parts, "reservation="+props.Reservation)
 	}
+	if props.UID != "" {
+		parts = append(parts, "uid="+props.UID)
+	}
+	if props.GID != "" {
+		parts = append(parts, "gid="+props.GID)
+	}
 
 	if len(parts) == 0 {
 		return ""

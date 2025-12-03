@@ -13,6 +13,8 @@ type ZFSProperties struct {
 	Compression string `yaml:"compression,omitempty"`
 	Recordsize  string `yaml:"recordsize,omitempty"`
 	Reservation string `yaml:"reservation,omitempty"`
+	UID         string `yaml:"uid,omitempty"`
+	GID         string `yaml:"gid,omitempty"`
 }
 
 // Dataset represents a ZFS dataset to be provisioned
@@ -34,6 +36,8 @@ var knownProperties = map[string]bool{
 	"compression": true,
 	"recordsize":  true,
 	"reservation": true,
+	"uid":         true,
+	"gid":         true,
 }
 
 // ParseFile reads a docker-compose file and extracts the x-zfs configuration
@@ -179,6 +183,12 @@ func parseProperties(m map[string]interface{}) ZFSProperties {
 	if v, ok := m["reservation"].(string); ok {
 		props.Reservation = v
 	}
+	if v, ok := m["uid"].(string); ok {
+		props.UID = v
+	}
+	if v, ok := m["gid"].(string); ok {
+		props.GID = v
+	}
 
 	return props
 }
@@ -198,6 +208,12 @@ func mergeProperties(defaults, overrides ZFSProperties) ZFSProperties {
 	}
 	if overrides.Reservation != "" {
 		result.Reservation = overrides.Reservation
+	}
+	if overrides.UID != "" {
+		result.UID = overrides.UID
+	}
+	if overrides.GID != "" {
+		result.GID = overrides.GID
 	}
 
 	return result

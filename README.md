@@ -94,8 +94,12 @@ Note: This requires the file to be accessible at the mount path, which may not w
 | `compression` | Compression algorithm | Yes | e.g., `zstd`, `lz4`, `off` |
 | `recordsize` | Record size | Yes | e.g., `16K`, `128K` |
 | `reservation` | Guaranteed space | Yes | e.g., `5G` |
+| `uid` | Owner user ID | Yes | Numeric ID, e.g., `1000` |
+| `gid` | Owner group ID | Yes | Numeric ID, e.g., `1000` |
 
 Note: `compression` and `recordsize` changes only affect newly written data.
+
+Note: `uid` and `gid` set ownership on the dataset mountpoint using `chown -R`. This is useful for ensuring containers can write to volumes.
 
 #### Dataset Forms
 
@@ -125,6 +129,21 @@ datasets:
       quota: "10G"
 ```
 Creates: `{parent}/postgres/data` and `{parent}/postgres/wal`
+
+**With ownership** - set uid/gid for container access:
+```yaml
+defaults:
+  uid: "1000"
+  gid: "1000"
+datasets:
+  redis: {}           # inherits uid=1000, gid=1000
+  postgres:
+    data:
+      quota: "50G"
+      uid: "999"      # postgres user
+      gid: "999"
+```
+Creates datasets with specified ownership (applied recursively via `chown -R`).
 
 ### CLI Options
 
