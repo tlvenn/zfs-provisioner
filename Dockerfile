@@ -19,8 +19,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /zfs-provisioner ./cmd
 # Runtime stage
 FROM alpine:3.20
 
-# Install ZFS userspace tools
-RUN apk add --no-cache zfs
+# Install ZFS userspace tools and coreutils for GNU stat
+RUN apk add --no-cache zfs coreutils
 
 # Copy binary
 COPY --from=builder /zfs-provisioner /usr/local/bin/zfs-provisioner
