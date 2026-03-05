@@ -5,106 +5,115 @@ import (
 	"io"
 
 	"github.com/tlvenn/zfs-provisioner/internal/config"
-	"github.com/tlvenn/zfs-provisioner/internal/zfs"
 )
+
+// Backend defines the interface for ZFS dataset operations
+type Backend interface {
+	DatasetExists(name string) (bool, error)
+	CreateDataset(name string, props config.ZFSProperties) error
+	UpdateProperties(name string, desired config.ZFSProperties) ([]string, error)
+}
 
 // Provisioner handles the provisioning of ZFS datasets
 type Provisioner struct {
-	zfs     *zfs.Client
+	zfs     Backend
 	dryRun  bool
 	verbose bool
 	output  io.Writer
 }
 
 // New creates a new Provisioner
-func New(dryRun, verbose bool, output io.Writer) *Provisioner {
+func New(backend Backend, dryRun, verbose bool, output io.Writer) *Provisioner {
 	return &Provisioner{
-		zfs:     zfs.NewClient(dryRun, verbose),
+		zfs:     backend,
 		dryRun:  dryRun,
 		verbose: verbose,
 		output:  output,
 	}
 }
 
-// Provision processes a config and provisions all datasets
+// Provision processes a config and provisions all datasets.
+// Returns an error on the first dataset that fails.
 func (p *Provisioner) Provision(cfg *config.Config) error {
 	if p.verbose {
 		fmt.Fprintf(p.output, "provisioning datasets under %s\n", cfg.Parent)
 	}
 
-	for _, dataset := range cfg.Datasets {
-		if err := p.provisionDataset(dataset); err != nil {
-			return fmt.Errorf("failed to provision %s: %w", dataset.Name, err)
+	results := p.ProvisionWithResults(cfg)
+	for _, r := range results {
+		if r.Action == "error" {
+			return fmt.Errorf("failed to provision %s: %s", r.Name, r.Error)
 		}
 	}
 
 	return nil
 }
 
-// provisionDataset handles a single dataset
-func (p *Provisioner) provisionDataset(dataset config.Dataset) error {
-	exists, err := p.zfs.DatasetExists(dataset.Name)
-	if err != nil {
-		return err
+// ProvisionWithResults processes a config and returns structured results per dataset
+func (p *Provisioner) ProvisionWithResults(cfg *config.Config) []config.DatasetResult {
+	var results []config.DatasetResult
+
+	for _, dataset := range cfg.Datasets {
+		results = append(results, p.provisionDataset(dataset))
 	}
 
-	if exists {
-		return p.updateDataset(dataset)
-	}
-
-	return p.createDataset(dataset)
+	return results
 }
 
-// createDataset creates a new dataset
-func (p *Provisioner) createDataset(dataset config.Dataset) error {
+func (p *Provisioner) provisionDataset(dataset config.Dataset) config.DatasetResult {
+	exists, err := p.zfs.DatasetExists(dataset.Name)
+	if err != nil {
+		return config.DatasetResult{Name: dataset.Name, Action: "error", Error: err.Error()}
+	}
+
+	if !exists {
+		return p.createDataset(dataset)
+	}
+
+	return p.updateDataset(dataset)
+}
+
+func (p *Provisioner) createDataset(dataset config.Dataset) config.DatasetResult {
 	if p.dryRun {
 		fmt.Fprintf(p.output, "[dry-run] would create %s%s\n", dataset.Name, formatProperties(dataset.Properties))
-		return nil
+		return config.DatasetResult{Name: dataset.Name, Action: "created"}
 	}
 
 	if err := p.zfs.CreateDataset(dataset.Name, dataset.Properties); err != nil {
-		return err
+		return config.DatasetResult{Name: dataset.Name, Action: "error", Error: err.Error()}
 	}
 
 	fmt.Fprintf(p.output, "created %s\n", dataset.Name)
-	return nil
+	return config.DatasetResult{Name: dataset.Name, Action: "created"}
 }
 
-// updateDataset updates an existing dataset if properties differ
-func (p *Provisioner) updateDataset(dataset config.Dataset) error {
-	if p.dryRun {
-		// In dry-run mode, still check what would be updated
-		updated, err := p.zfs.UpdateProperties(dataset.Name, dataset.Properties)
-		if err != nil {
-			return err
-		}
-
-		if len(updated) > 0 {
-			fmt.Fprintf(p.output, "[dry-run] would update %s\n", dataset.Name)
-			for _, u := range updated {
-				fmt.Fprintf(p.output, "  %s\n", u)
-			}
-		} else if p.verbose {
-			fmt.Fprintf(p.output, "[dry-run] %s unchanged\n", dataset.Name)
-		}
-		return nil
-	}
-
-	updated, err := p.zfs.UpdateProperties(dataset.Name, dataset.Properties)
+func (p *Provisioner) updateDataset(dataset config.Dataset) config.DatasetResult {
+	changes, err := p.zfs.UpdateProperties(dataset.Name, dataset.Properties)
 	if err != nil {
-		return err
+		return config.DatasetResult{Name: dataset.Name, Action: "error", Error: err.Error()}
 	}
 
-	if len(updated) > 0 {
-		fmt.Fprintf(p.output, "updated %s\n", dataset.Name)
-		for _, u := range updated {
-			fmt.Fprintf(p.output, "  %s\n", u)
+	if len(changes) > 0 {
+		if p.dryRun {
+			fmt.Fprintf(p.output, "[dry-run] would update %s\n", dataset.Name)
+		} else {
+			fmt.Fprintf(p.output, "updated %s\n", dataset.Name)
 		}
-	} else if p.verbose {
-		fmt.Fprintf(p.output, "%s unchanged\n", dataset.Name)
+		for _, c := range changes {
+			fmt.Fprintf(p.output, "  %s\n", c)
+		}
+		return config.DatasetResult{Name: dataset.Name, Action: "updated", Changes: changes}
 	}
 
-	return nil
+	if p.verbose {
+		if p.dryRun {
+			fmt.Fprintf(p.output, "[dry-run] %s unchanged\n", dataset.Name)
+		} else {
+			fmt.Fprintf(p.output, "%s unchanged\n", dataset.Name)
+		}
+	}
+
+	return config.DatasetResult{Name: dataset.Name, Action: "unchanged"}
 }
 
 // formatProperties formats properties for display

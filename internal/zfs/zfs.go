@@ -11,15 +11,13 @@ import (
 
 // Client handles ZFS operations
 type Client struct {
-	dryRun  bool
-	verbose bool
+	dryRun bool
 }
 
 // NewClient creates a new ZFS client
-func NewClient(dryRun, verbose bool) *Client {
+func NewClient(dryRun bool) *Client {
 	return &Client{
-		dryRun:  dryRun,
-		verbose: verbose,
+		dryRun: dryRun,
 	}
 }
 
@@ -104,10 +102,6 @@ func (c *Client) CreateDataset(name string, props config.ZFSProperties) error {
 	// Create parent datasets if needed
 	args = append(args, "-p")
 	args = append(args, name)
-
-	if c.dryRun {
-		return nil
-	}
 
 	cmd := exec.Command("zfs", args...)
 	var stderr bytes.Buffer
@@ -262,28 +256,13 @@ func (c *Client) GetMountpoint(name string) (string, error) {
 
 // GetOwnership returns the current uid and gid of a mountpoint
 func (c *Client) GetOwnership(mountpoint string) (uid, gid string, err error) {
-	// Use stat to get ownership - format differs by OS
-	// On Linux: stat -c '%u:%g' <path>
-	// On macOS/BSD: stat -f '%u:%g' <path>
-	var cmd *exec.Cmd
-
-	// Try Linux format first, fall back to BSD format
-	cmd = exec.Command("stat", "-c", "%u:%g", mountpoint)
+	cmd := exec.Command("stat", "-c", "%u:%g", mountpoint)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		// Try BSD/macOS format
-		cmd = exec.Command("stat", "-f", "%u:%g", mountpoint)
-		stdout.Reset()
-		stderr.Reset()
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-
-		if err := cmd.Run(); err != nil {
-			return "", "", fmt.Errorf("failed to get ownership: %s", stderr.String())
-		}
+		return "", "", fmt.Errorf("failed to get ownership: %s", stderr.String())
 	}
 
 	parts := strings.Split(strings.TrimSpace(stdout.String()), ":")

@@ -397,6 +397,65 @@ x-zfs:
 	}
 }
 
+func TestParse_InvalidUID(t *testing.T) {
+	yaml := `
+x-zfs:
+  parent: "tank/docker/stacks/myapp"
+  datasets:
+    redis:
+      uid: "--reference=/etc/shadow"
+`
+
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Error("expected error for non-numeric uid")
+	}
+}
+
+func TestParse_InvalidGID(t *testing.T) {
+	yaml := `
+x-zfs:
+  parent: "tank/docker/stacks/myapp"
+  datasets:
+    redis:
+      gid: "notanumber"
+`
+
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Error("expected error for non-numeric gid")
+	}
+}
+
+func TestParse_NumericUIDWithoutQuotes(t *testing.T) {
+	yaml := `
+x-zfs:
+  parent: "tank/docker/stacks/myapp"
+  datasets:
+    redis:
+      uid: 1000
+      gid: 1000
+`
+
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	datasets := make(map[string]Dataset)
+	for _, ds := range cfg.Datasets {
+		datasets[ds.Name] = ds
+	}
+
+	redis := datasets["tank/docker/stacks/myapp/redis"]
+	if redis.Properties.UID != "1000" {
+		t.Errorf("redis.UID = %q, want %q", redis.Properties.UID, "1000")
+	}
+	if redis.Properties.GID != "1000" {
+		t.Errorf("redis.GID = %q, want %q", redis.Properties.GID, "1000")
+	}
+}
+
 func TestParse_GIDOnly(t *testing.T) {
 	yaml := `
 x-zfs:

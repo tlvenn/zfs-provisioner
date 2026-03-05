@@ -1,12 +1,19 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 
+	"github.com/tlvenn/zfs-provisioner/internal/client"
 	"github.com/tlvenn/zfs-provisioner/internal/config"
 	"github.com/tlvenn/zfs-provisioner/internal/provisioner"
+	"github.com/tlvenn/zfs-provisioner/internal/server"
+	"github.com/tlvenn/zfs-provisioner/internal/zfs"
 )
 
 var (
@@ -14,54 +21,89 @@ var (
 )
 
 func main() {
-	dryRun := flag.Bool("dry-run", false, "Show what would be created/updated without making changes")
-	verbose := flag.Bool("v", false, "Verbose output")
-	showVersion := flag.Bool("version", false, "Show version")
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		runServe(os.Args[2:])
+		return
+	}
 
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: zfs-provisioner [flags] [compose-file]\n\n")
+	runProvision(os.Args[1:])
+}
+
+func runServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	listen := fs.String("listen", "127.0.0.1:9274", "Comma-separated addresses to listen on")
+	fs.Parse(args)
+
+	addrs := strings.Split(*listen, ",")
+
+	backend := zfs.NewClient(false)
+	srv := server.New(backend)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := srv.ListenAndServe(ctx, addrs); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runProvision(args []string) {
+	fs := flag.NewFlagSet("provision", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", false, "Show what would be created/updated without making changes")
+	verbose := fs.Bool("v", false, "Verbose output")
+	showVersion := fs.Bool("version", false, "Show version")
+
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: zfs-provisioner [flags] [compose-file]\n")
+		fmt.Fprintf(os.Stderr, "       zfs-provisioner serve [--listen addr[,addr...]]\n\n")
 		fmt.Fprintf(os.Stderr, "Provisions ZFS datasets based on x-zfs configuration.\n\n")
 		fmt.Fprintf(os.Stderr, "Configuration can be provided via:\n")
 		fmt.Fprintf(os.Stderr, "  - File path as argument\n")
-		fmt.Fprintf(os.Stderr, "  - ZFS_CONFIG environment variable (x-zfs content as YAML)\n\n")
+		fmt.Fprintf(os.Stderr, "  - ZFS_CONFIG environment variable (x-zfs content as YAML)\n")
+		fmt.Fprintf(os.Stderr, "  - ZFS_REMOTE environment variable (remote server URL)\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 	}
 
-	flag.Parse()
+	fs.Parse(args)
 
 	if *showVersion {
 		fmt.Printf("zfs-provisioner %s\n", version)
 		os.Exit(0)
 	}
 
-	var cfg *config.Config
-	var err error
-
-	// Check for ZFS_CONFIG environment variable first
-	if envConfig := os.Getenv("ZFS_CONFIG"); envConfig != "" {
-		cfg, err = config.ParseEnv(envConfig)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error parsing ZFS_CONFIG: %v\n", err)
-			os.Exit(1)
-		}
-	} else if flag.NArg() == 1 {
-		// Fall back to file argument
-		cfg, err = config.ParseFile(flag.Arg(0))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "error: no configuration provided\n")
-		fmt.Fprintf(os.Stderr, "Provide either ZFS_CONFIG environment variable or a compose file path\n")
+	cfg, err := parseConfig(fs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
-	p := provisioner.New(*dryRun, *verbose, os.Stdout)
+	// Remote mode: send config to server
+	if remoteURL := os.Getenv("ZFS_REMOTE"); remoteURL != "" {
+		if err := client.NewClient(remoteURL).Provision(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
+	// Local mode: run ZFS commands directly
+	p := provisioner.New(zfs.NewClient(*dryRun), *dryRun, *verbose, os.Stdout)
 	if err := p.Provision(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func parseConfig(fs *flag.FlagSet) (*config.Config, error) {
+	if envConfig := os.Getenv("ZFS_CONFIG"); envConfig != "" {
+		return config.ParseEnv(envConfig)
+	}
+
+	if fs.NArg() == 1 {
+		return config.ParseFile(fs.Arg(0))
+	}
+
+	return nil, fmt.Errorf("no configuration provided\nProvide either ZFS_CONFIG environment variable or a compose file path")
 }
