@@ -81,6 +81,15 @@ func runProvision(args []string) {
 
 	// Remote mode: send config to server
 	if remoteURL := os.Getenv("ZFS_REMOTE"); remoteURL != "" {
+		if remoteURL == "auto" {
+			gw, err := client.DetectGateway()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: failed to auto-detect gateway: %v\n", err)
+				os.Exit(1)
+			}
+			remoteURL = "http://" + gw + ":9274"
+			fmt.Fprintf(os.Stdout, "detected gateway: %s\n", remoteURL)
+		}
 		if err := client.NewClient(remoteURL).Provision(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)

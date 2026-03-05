@@ -156,15 +156,16 @@ Creates datasets with specified ownership (applied recursively via `chown -R`).
 
 For environments where Docker runs inside VMs or containers without ZFS access (e.g., Incus/LXD), the provisioner can send requests to a server running on the ZFS host.
 
-Set the `ZFS_REMOTE` environment variable to the server URL:
+Set the `ZFS_REMOTE` environment variable. Use `auto` with `network_mode: host` to auto-detect the gateway (recommended), or specify an explicit URL:
 
 ```yaml
 services:
   zfs-provisioner:
     image: ghcr.io/tlvenn/zfs-provisioner:latest
     restart: on-failure
+    network_mode: host
     environment:
-      ZFS_REMOTE: "http://172.16.2.1:9274"
+      ZFS_REMOTE: "auto"
       ZFS_CONFIG: |
         parent: "rpool/data/noja/ops/myapp"
         defaults:
@@ -173,8 +174,6 @@ services:
           clickhouse:
             quota: "50G"
             recordsize: "16K"
-    networks:
-      - app-network
 
   clickhouse:
     depends_on:
@@ -183,6 +182,10 @@ services:
     volumes:
       - /data/myapp/clickhouse:/var/lib/clickhouse/
 ```
+
+`ZFS_REMOTE=auto` detects the default gateway from `/proc/net/route` and connects to port 9274. This works with `network_mode: host` where the container shares the host's network stack, making the gateway the machine running the ZFS server.
+
+You can also specify an explicit URL: `ZFS_REMOTE: "http://172.16.2.1:9274"`.
 
 Note: no `privileged: true` or `/dev/zfs` mount is needed in remote mode. The client retries with exponential backoff (1s, 2s, 4s... up to 30s cap) for 2 minutes if the server is unreachable, handling boot-order race conditions.
 
