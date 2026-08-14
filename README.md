@@ -33,6 +33,8 @@ services:
     privileged: true
     volumes:
       - /dev/zfs:/dev/zfs
+      # rshared is required in local mode — see "Mount Propagation & Safety Checks"
+      - /tank/docker/stacks/myapp:/tank/docker/stacks/myapp:rshared
     environment:
       ZFS_CONFIG: |
         parent: "tank/docker/stacks/myapp"
@@ -353,6 +355,44 @@ docker build -t zfs-provisioner:latest .
 4. Server creates/updates ZFS datasets and returns results
 5. Client reports results and exits 0 (success) or 1 (any dataset failed)
 6. Other services start via `depends_on: condition: service_completed_successfully`
+
+## Mount Propagation & Safety Checks
+
+In **local mode**, the provisioner performs the `zfs mount` from inside its own
+container. Mount propagation on its volume decides whether that mount ever
+reaches the host:
+
+- **`rshared` (required for local mode)** — mounts propagate both ways. Datasets
+  the provisioner mounts become visible on the host immediately.
+- **`rslave`** — one-way, host → container only. Datasets mounted by the
+  provisioner exist *only inside its namespace*: applications then bind a plain
+  host directory, write months of data to it, and that data is silently
+  shadowed the next time the host mounts the dataset (typically a reboot or OS
+  upgrade). Use rslave only for *consumers* in remote mode, where the ZFS host
+  does the mounting.
+- **no flag (`rprivate`, the Docker default)** — no propagation at all; same
+  failure mode as rslave.
+
+The host-side path must itself be a shared mount for `rshared` to work; on
+systemd hosts this is the default (`findmnt -no PROPAGATION /path` should say
+`shared`).
+
+To make this class of failure loud instead of silent, the provisioner enforces
+three checks (bypass all of them with `ZFS_SKIP_MOUNT_CHECKS=1`):
+
+1. **Propagation guard** (startup, local mode and server mode): when running
+   inside a container, the parent's mountpoint must have shared propagation —
+   otherwise the run is refused with the exact volume line to fix.
+2. **Mount visibility** (after each dataset is created, updated, or found
+   unchanged): the dataset must actually be mounted at its mountpoint in the
+   provisioner's namespace. This catches pre-existing shadowed state on every
+   run, not just at creation time.
+3. **Non-empty mountpoint** (before creation): if the would-be mountpoint
+   directory already contains data, creation is refused instead of silently
+   shadowing that data with the new dataset's mount.
+
+Checks degrade to no-ops on systems without `/proc` and when not running in a
+container, so bare-host and development usage is unaffected.
 
 ## Idempotency
 

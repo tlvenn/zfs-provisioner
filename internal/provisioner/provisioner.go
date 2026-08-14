@@ -12,6 +12,7 @@ type Backend interface {
 	DatasetExists(name string) (bool, error)
 	CreateDataset(name string, props config.ZFSProperties) error
 	UpdateProperties(name string, desired config.ZFSProperties) ([]string, error)
+	VerifyMounted(name string) error
 }
 
 // Provisioner handles the provisioning of ZFS datasets
@@ -66,11 +67,22 @@ func (p *Provisioner) provisionDataset(dataset config.Dataset) config.DatasetRes
 		return config.DatasetResult{Name: dataset.Name, Action: "error", Error: err.Error()}
 	}
 
+	var result config.DatasetResult
 	if !exists {
-		return p.createDataset(dataset)
+		result = p.createDataset(dataset)
+	} else {
+		result = p.updateDataset(dataset)
 	}
 
-	return p.updateDataset(dataset)
+	// Whatever the action, the dataset must actually be mounted in our
+	// namespace — otherwise applications write to a shadowed directory.
+	if result.Action != "error" && !p.dryRun {
+		if err := p.zfs.VerifyMounted(dataset.Name); err != nil {
+			return config.DatasetResult{Name: dataset.Name, Action: "error", Error: err.Error()}
+		}
+	}
+
+	return result
 }
 
 func (p *Provisioner) createDataset(dataset config.Dataset) config.DatasetResult {

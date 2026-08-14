@@ -11,6 +11,7 @@ import (
 
 	"github.com/tlvenn/zfs-provisioner/internal/client"
 	"github.com/tlvenn/zfs-provisioner/internal/config"
+	"github.com/tlvenn/zfs-provisioner/internal/mountcheck"
 	"github.com/tlvenn/zfs-provisioner/internal/provisioner"
 	"github.com/tlvenn/zfs-provisioner/internal/server"
 	"github.com/tlvenn/zfs-provisioner/internal/zfs"
@@ -98,7 +99,23 @@ func runProvision(args []string) {
 	}
 
 	// Local mode: run ZFS commands directly
-	p := provisioner.New(zfs.NewClient(*dryRun), *dryRun, *verbose, os.Stdout)
+	backend := zfs.NewClient(*dryRun)
+
+	// In local mode this process performs the zfs mounts itself, so when it
+	// runs inside a container the parent mountpoint must have shared
+	// propagation for those mounts to reach the host.
+	if mp, err := backend.NearestMountpoint(cfg.Parent); err == nil && strings.HasPrefix(mp, "/") {
+		if err := mountcheck.VerifyPropagation(mp); err != nil {
+			if *dryRun {
+				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	}
+
+	p := provisioner.New(backend, *dryRun, *verbose, os.Stdout)
 	if err := p.Provision(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

@@ -4,6 +4,11 @@ services:
     privileged: true
     volumes:
       - /dev/zfs:/dev/zfs
+      # rshared is required in local mode: the provisioner mounts datasets
+      # from inside this container, and without shared propagation those
+      # mounts never reach the host — apps would write to a plain directory
+      # that gets shadowed when the host mounts the dataset (e.g. on reboot).
+      - /tank/docker/stacks/myapp:/tank/docker/stacks/myapp:rshared
     environment:
       ZFS_CONFIG: |
         parent: "tank/docker/stacks/myapp"

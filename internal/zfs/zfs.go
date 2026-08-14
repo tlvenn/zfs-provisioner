@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/tlvenn/zfs-provisioner/internal/config"
+	"github.com/tlvenn/zfs-provisioner/internal/mountcheck"
 )
 
 // Client handles ZFS operations
@@ -83,6 +84,14 @@ func (c *Client) GetProperties(name string) (config.ZFSProperties, error) {
 
 // CreateDataset creates a new ZFS dataset with the specified properties
 func (c *Client) CreateDataset(name string, props config.ZFSProperties) error {
+	if !c.dryRun {
+		if mp, err := c.expectedMountpoint(name); err == nil && mp != "" {
+			if err := mountcheck.VerifyDirEmptyForMount(name, mp); err != nil {
+				return err
+			}
+		}
+	}
+
 	args := []string{"create"}
 
 	// Add properties
@@ -238,6 +247,77 @@ func (c *Client) UpdateProperties(name string, desired config.ZFSProperties) ([]
 func normalizeSize(s string) string {
 	// For now, just lowercase and trim - could expand to handle byte conversion
 	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// VerifyMounted checks that the dataset is what is actually mounted at its
+// mountpoint in this process's namespace, catching failed automounts and
+// shadowed mountpoint directories. Datasets with non-path mountpoints
+// (legacy, none) are skipped.
+func (c *Client) VerifyMounted(name string) error {
+	if c.dryRun {
+		return nil
+	}
+
+	mountpoint, err := c.GetMountpoint(name)
+	if err != nil {
+		return err
+	}
+
+	return mountcheck.VerifyDatasetMounted(name, mountpoint)
+}
+
+// NearestMountpoint returns the mountpoint of the dataset, or of its deepest
+// existing ancestor if the dataset does not exist yet.
+func (c *Client) NearestMountpoint(name string) (string, error) {
+	for current := name; current != ""; {
+		exists, err := c.DatasetExists(current)
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return c.GetMountpoint(current)
+		}
+
+		idx := strings.LastIndex(current, "/")
+		if idx == -1 {
+			break
+		}
+		current = current[:idx]
+	}
+
+	return "", fmt.Errorf("no existing ancestor dataset found for %s", name)
+}
+
+// expectedMountpoint computes where a not-yet-created dataset will be mounted,
+// based on the deepest existing ancestor's mountpoint. Returns "" when the
+// ancestor uses a non-path mountpoint or no ancestor exists.
+func (c *Client) expectedMountpoint(name string) (string, error) {
+	current := name
+	for {
+		idx := strings.LastIndex(current, "/")
+		if idx == -1 {
+			return "", nil
+		}
+		current = current[:idx]
+
+		exists, err := c.DatasetExists(current)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			continue
+		}
+
+		mp, err := c.GetMountpoint(current)
+		if err != nil {
+			return "", err
+		}
+		if !strings.HasPrefix(mp, "/") {
+			return "", nil
+		}
+
+		return mp + strings.TrimPrefix(name, current), nil
+	}
 }
 
 // GetMountpoint returns the mountpoint path for a dataset

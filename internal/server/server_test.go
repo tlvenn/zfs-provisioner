@@ -35,6 +35,10 @@ func (m *mockBackend) UpdateProperties(name string, desired config.ZFSProperties
 	return nil, nil
 }
 
+func (m *mockBackend) VerifyMounted(name string) error {
+	return nil
+}
+
 func TestHandleProvision_CreateDatasets(t *testing.T) {
 	backend := newMockBackend()
 	srv := New(backend)

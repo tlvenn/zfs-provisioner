@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/tlvenn/zfs-provisioner/internal/config"
+	"github.com/tlvenn/zfs-provisioner/internal/mountcheck"
 	"github.com/tlvenn/zfs-provisioner/internal/provisioner"
 )
 
@@ -57,6 +59,20 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Printf("provisioning %d datasets under %s", len(cfg.Datasets), cfg.Parent)
+
+	// The server performs the zfs mounts, so if it is itself containerized
+	// its parent mountpoint needs shared propagation to reach the host.
+	if resolver, ok := s.backend.(interface {
+		NearestMountpoint(string) (string, error)
+	}); ok {
+		if mp, err := resolver.NearestMountpoint(cfg.Parent); err == nil && strings.HasPrefix(mp, "/") {
+			if err := mountcheck.VerifyPropagation(mp); err != nil {
+				s.logger.Printf("provision rejected: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+	}
 
 	s.mu.Lock()
 	p := provisioner.New(s.backend, false, false, io.Discard)
