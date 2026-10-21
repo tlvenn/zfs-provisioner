@@ -51,6 +51,9 @@ type DatasetResult struct {
 	Action  string   `json:"action"` // created, updated, unchanged, error
 	Changes []string `json:"changes,omitempty"`
 	Error   string   `json:"error,omitempty"`
+	// Container paths ("project/name:path") where the dataset's mount was
+	// swapped for an idmapped one
+	Idmapped []string `json:"idmapped,omitempty"`
 }
 
 // knownProperties is the set of ZFS property keys we recognize
