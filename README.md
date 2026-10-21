@@ -308,6 +308,9 @@ curl -fsSL https://raw.githubusercontent.com/tlvenn/zfs-provisioner/main/install
 
 # One bridge, one subtree (recommended)
 LISTEN_ADDR=172.16.0.1:9274 ALLOW_PARENT=rpool/data/magelo/ops ./install-server.sh v0.5.0
+
+# Another bridge gets its own instance, confined to its own subtree
+SERVICE_NAME=zfs-provisioner-jumpn LISTEN_ADDR=172.16.1.1:9274 ALLOW_PARENT=rpool/data/jumpn/ops ./install-server.sh v0.5.0
 ```
 
 The script:
@@ -315,13 +318,15 @@ The script:
 2. Falls back to `127.0.0.1:9274` if no Incus bridges are found
 3. Downloads the `zfs-provisioner-linux-amd64` binary from GitHub releases
 4. Installs it to `/usr/local/bin/`
-5. Creates a systemd service (`zfs-provisioner.service`) without mount namespacing (see above)
+5. Creates a systemd service (`zfs-provisioner.service`, or `$SERVICE_NAME.service`) without mount namespacing (see above)
 6. Enables and starts the service
 7. Runs a health check
 
 Override auto-detection with `LISTEN_ADDR` env var or `--listen` flag, and restrict provisioning with `ALLOW_PARENT` or `--allow-parent`.
 
-To update, run the script again — it stops the service, replaces the binary, and restarts.
+One server listening on several bridges lets every container on them provision anywhere it is allowed. When the bridges belong to different tenants, run one instance per bridge instead: give each a `SERVICE_NAME`, its bridge address and its own `ALLOW_PARENT`. Instances share the binary, so updating one replaces it for all; restart the others to run the new version.
+
+To update, run the script again with the same variables — it stops the service, replaces the binary, and restarts.
 
 ### Manual Server Setup
 
