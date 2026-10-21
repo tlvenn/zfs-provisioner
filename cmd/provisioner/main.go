@@ -11,6 +11,7 @@ import (
 
 	"github.com/tlvenn/zfs-provisioner/internal/client"
 	"github.com/tlvenn/zfs-provisioner/internal/config"
+	"github.com/tlvenn/zfs-provisioner/internal/idmap"
 	"github.com/tlvenn/zfs-provisioner/internal/mountcheck"
 	"github.com/tlvenn/zfs-provisioner/internal/provisioner"
 	"github.com/tlvenn/zfs-provisioner/internal/server"
@@ -33,12 +34,32 @@ func main() {
 func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	listen := fs.String("listen", "127.0.0.1:9274", "Comma-separated addresses to listen on")
+	allowParent := fs.String("allow-parent", "", "Comma-separated datasets under which provisioning is allowed (default: anywhere)")
+	idmapRepair := fs.Bool("idmap-repair", true, "Re-idmap provisioned datasets inside running Incus containers (only when incus is installed)")
 	fs.Parse(args)
 
 	addrs := strings.Split(*listen, ",")
 
+	// The server performs the zfs mounts itself, so it must share the host's
+	// mount namespace for them to be visible anywhere else.
+	if err := mountcheck.VerifyHostMountNamespace(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	var opts []server.Option
+	if *allowParent != "" {
+		opts = append(opts, server.WithAllowedParents(strings.Split(*allowParent, ",")))
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: no --allow-parent set: any client that can reach this server can provision or change any dataset\n")
+	}
+	if *idmapRepair && idmap.Available() {
+		opts = append(opts, server.WithIdmapRepair(idmap.NewRepairer()))
+		fmt.Fprintf(os.Stdout, "incus found: provisioned datasets will be idmapped inside running containers\n")
+	}
+
 	backend := zfs.NewClient(false)
-	srv := server.New(backend)
+	srv := server.New(backend, opts...)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -57,7 +78,7 @@ func runProvision(args []string) {
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: zfs-provisioner [flags] [compose-file]\n")
-		fmt.Fprintf(os.Stderr, "       zfs-provisioner serve [--listen addr[,addr...]]\n\n")
+		fmt.Fprintf(os.Stderr, "       zfs-provisioner serve [--listen addr[,addr...]] [--allow-parent dataset[,dataset...]] [--idmap-repair=false]\n\n")
 		fmt.Fprintf(os.Stderr, "Provisions ZFS datasets based on x-zfs configuration.\n\n")
 		fmt.Fprintf(os.Stderr, "Configuration can be provided via:\n")
 		fmt.Fprintf(os.Stderr, "  - File path as argument\n")

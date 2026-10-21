@@ -195,7 +195,7 @@ Note: no `privileged: true` or `/dev/zfs` mount is needed in remote mode. The cl
 
 ```
 Usage: zfs-provisioner [flags] [compose-file]
-       zfs-provisioner serve [--listen addr]
+       zfs-provisioner serve [--listen addr] [--allow-parent dataset] [--idmap-repair=false]
 
 Configuration can be provided via:
   - ZFS_CONFIG environment variable (x-zfs content as YAML)
@@ -208,7 +208,9 @@ Flags:
   --version    Show version
 
 Serve flags:
-  --listen     Comma-separated addresses to listen on (default: 127.0.0.1:9274)
+  --listen        Comma-separated addresses to listen on (default: 127.0.0.1:9274)
+  --allow-parent  Comma-separated datasets under which provisioning is allowed (default: anywhere)
+  --idmap-repair  Re-idmap provisioned datasets inside running Incus containers (default: true, only when incus is installed)
 ```
 
 ### Output
@@ -254,14 +256,16 @@ Response:
 ```json
 {
   "results": [
-    {"name": "rpool/data/noja/ops/myapp/redis", "action": "created"},
+    {"name": "rpool/data/noja/ops/myapp/redis", "action": "created", "idmapped": ["noja/ops:/data/myapp"]},
     {"name": "rpool/data/noja/ops/myapp/postgres/data", "action": "created"},
     {"name": "rpool/data/noja/ops/myapp/postgres/wal", "action": "unchanged"}
   ]
 }
 ```
 
-Actions: `created`, `updated`, `unchanged`, `error`. Errors include an `error` field with details.
+Actions: `created`, `updated`, `unchanged`, `error`. Errors include an `error` field with details. `idmapped` lists the container paths where the dataset's mount was swapped for an idmapped one (see [Incus containers](#incus-containers-shifttrue)).
+
+A parent outside `--allow-parent` is refused with `403`.
 
 **`GET /health`** — check server and ZFS availability
 
@@ -269,19 +273,41 @@ Returns `{"status": "ok"}` (200) or `{"status": "error", "error": "..."}` (503).
 
 Concurrent requests are serialized with a mutex.
 
+### Restricting What Clients Can Provision
+
+The API has no authentication: anything that can reach it can create datasets, change quotas and `chown -R` mountpoints. Bind it only to the bridge its clients sit on and pass `--allow-parent` so requests outside that subtree are refused:
+
+```bash
+zfs-provisioner serve --listen 172.16.0.1:9274 --allow-parent rpool/data/magelo/ops
+```
+
+Without `--allow-parent` the server logs a warning at startup and accepts any parent.
+
+### Incus Containers (shift=true)
+
+Incus implements `shift=true` on a disk device by giving every mount of the device an idmapped mount when the container starts. A dataset created later under a `recursive=true` device reaches the running container through mount propagation instead, and a propagated mount carries no idmap: the container sees it owned by `nobody:nobody`, and its root cannot write to it until the container restarts.
+
+When `incus` is installed on the host, the server repairs this after every provision. For each running container whose shifted, recursive disk device covers the dataset, it clones the host mount (`open_tree`), idmaps the clone with the container's user namespace and makes it a slave of the host's mount (`mount_setattr`), then swaps it in for the propagated mount inside the container's mount namespace (`move_mount`). The result is the mount Incus itself makes at start, so a later container restart changes nothing. Datasets that `zfs create -p` created implicitly on the way are repaired too, and repeat runs are no-ops. Disable with `--idmap-repair=false`.
+
+The clone must be a slave: a plain clone of a shared mount joins the host mount's peer group. Unmounts inside the container, including the teardown when it stops, would then propagate back and unmount the host's nested datasets.
+
+### Running Under systemd
+
+The server mounts datasets itself, so it must share the host's mount namespace. `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=`, `PrivateMounts=` and every other setting that gives a unit its own mount namespace make that namespace a slave of the host's: datasets the server mounts would exist only inside the service, and applications would write to the bare directories underneath. The server refuses to start in a mount namespace other than PID 1's (bypass with `ZFS_SKIP_MOUNT_CHECKS=1`).
+
 ### Installing the Server
 
 Run the install script on the ZFS host:
 
 ```bash
 # Download and run (uses latest GitHub release)
-curl -fsSL https://raw.githubusercontent.com/tlvenn/zfs_provisioner/main/install-server.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/tlvenn/zfs-provisioner/main/install-server.sh | sudo bash
 
 # Or install a specific version
 ./install-server.sh v1.0.0
 
-# Custom listen address
-LISTEN_ADDR=0.0.0.0:9274 ./install-server.sh
+# One bridge, one subtree (recommended)
+LISTEN_ADDR=172.16.0.1:9274 ALLOW_PARENT=rpool/data/magelo/ops ./install-server.sh v0.5.0
 ```
 
 The script:
@@ -289,11 +315,11 @@ The script:
 2. Falls back to `127.0.0.1:9274` if no Incus bridges are found
 3. Downloads the `zfs-provisioner-linux-amd64` binary from GitHub releases
 4. Installs it to `/usr/local/bin/`
-5. Creates a hardened systemd service (`zfs-provisioner.service`)
+5. Creates a systemd service (`zfs-provisioner.service`) without mount namespacing (see above)
 6. Enables and starts the service
 7. Runs a health check
 
-Override auto-detection with `LISTEN_ADDR` env var or `--listen` flag.
+Override auto-detection with `LISTEN_ADDR` env var or `--listen` flag, and restrict provisioning with `ALLOW_PARENT` or `--allow-parent`.
 
 To update, run the script again — it stops the service, replaces the binary, and restarts.
 

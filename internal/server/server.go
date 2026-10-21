@@ -14,25 +14,62 @@ import (
 	"time"
 
 	"github.com/tlvenn/zfs-provisioner/internal/config"
+	"github.com/tlvenn/zfs-provisioner/internal/idmap"
 	"github.com/tlvenn/zfs-provisioner/internal/mountcheck"
 	"github.com/tlvenn/zfs-provisioner/internal/provisioner"
 )
 
 const maxRequestBody = 1 << 20 // 1MB
 
+// IdmapRepairer fixes the ownership view of datasets that show up inside
+// running Incus containers after they started (see package idmap).
+type IdmapRepairer interface {
+	Instances() ([]idmap.Instance, error)
+	Repair(instances []idmap.Instance, hostMountpoint string) ([]string, error)
+}
+
 // Server handles HTTP provisioning requests
 type Server struct {
-	backend provisioner.Backend
-	mu      sync.Mutex
-	logger  *log.Logger
+	backend        provisioner.Backend
+	allowedParents []string
+	repairer       IdmapRepairer
+	mu             sync.Mutex
+	logger         *log.Logger
+}
+
+// Option configures a Server
+type Option func(*Server)
+
+// WithAllowedParents restricts provisioning to these datasets and their
+// descendants. Without it any parent in any pool is accepted.
+func WithAllowedParents(parents []string) Option {
+	return func(s *Server) {
+		for _, p := range parents {
+			if p = strings.Trim(strings.TrimSpace(p), "/"); p != "" {
+				s.allowedParents = append(s.allowedParents, p)
+			}
+		}
+	}
+}
+
+// WithIdmapRepair re-idmaps provisioned datasets inside running Incus
+// containers.
+func WithIdmapRepair(r IdmapRepairer) Option {
+	return func(s *Server) {
+		s.repairer = r
+	}
 }
 
 // New creates a new Server
-func New(backend provisioner.Backend) *Server {
-	return &Server{
+func New(backend provisioner.Backend, opts ...Option) *Server {
+	s := &Server{
 		backend: backend,
 		logger:  log.New(os.Stdout, "", log.LstdFlags),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Handler returns the HTTP handler for the server
@@ -58,6 +95,12 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if status, err := s.checkParent(cfg.Parent); err != nil {
+		s.logger.Printf("provision rejected from %s: %v", r.RemoteAddr, err)
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+
 	s.logger.Printf("provisioning %d datasets under %s", len(cfg.Datasets), cfg.Parent)
 
 	// The server performs the zfs mounts, so if it is itself containerized
@@ -77,6 +120,9 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	p := provisioner.New(s.backend, false, false, io.Discard)
 	results := p.ProvisionWithResults(cfg)
+	if s.repairer != nil {
+		s.repairIdmaps(results)
+	}
 	s.mu.Unlock()
 
 	for _, result := range results {
@@ -85,9 +131,77 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.logger.Printf("  %s: %s", result.Name, result.Action)
 		}
+		for _, where := range result.Idmapped {
+			s.logger.Printf("    idmapped in %s", where)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, config.ProvisionResponse{Results: results})
+}
+
+// checkParent validates the requested parent dataset against the allowlist.
+func (s *Server) checkParent(parent string) (int, error) {
+	for _, comp := range strings.Split(parent, "/") {
+		if comp == "" || comp == "." || comp == ".." {
+			return http.StatusBadRequest, fmt.Errorf("invalid parent dataset %q", parent)
+		}
+	}
+
+	if len(s.allowedParents) == 0 {
+		return 0, nil
+	}
+	for _, allowed := range s.allowedParents {
+		if parent == allowed || strings.HasPrefix(parent, allowed+"/") {
+			return 0, nil
+		}
+	}
+
+	return http.StatusForbidden, fmt.Errorf("parent %q is outside the datasets this server provisions (%s)",
+		parent, strings.Join(s.allowedParents, ", "))
+}
+
+// repairIdmaps swaps idmapped mounts in for the propagated mounts running
+// Incus containers received for these datasets. A failure marks the dataset
+// as errored: the container would see it owned by nobody.
+func (s *Server) repairIdmaps(results []config.DatasetResult) {
+	resolver, ok := s.backend.(interface {
+		GetMountpoint(string) (string, error)
+	})
+	if !ok {
+		return
+	}
+
+	instances, err := s.repairer.Instances()
+	if err != nil {
+		for i := range results {
+			if results[i].Action != "error" {
+				results[i] = config.DatasetResult{Name: results[i].Name, Action: "error", Error: "listing incus instances: " + err.Error()}
+			}
+		}
+		return
+	}
+
+	for i := range results {
+		if results[i].Action == "error" {
+			continue
+		}
+
+		mp, err := resolver.GetMountpoint(results[i].Name)
+		if err != nil {
+			results[i] = config.DatasetResult{Name: results[i].Name, Action: "error", Error: err.Error()}
+			continue
+		}
+		if !strings.HasPrefix(mp, "/") {
+			continue
+		}
+
+		fixed, err := s.repairer.Repair(instances, mp)
+		results[i].Idmapped = fixed
+		if err != nil {
+			results[i].Action = "error"
+			results[i].Error = "idmap repair: " + err.Error()
+		}
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -49,7 +49,7 @@ func (c *Client) Provision(cfg *config.Config) error {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
-	if resp.StatusCode == http.StatusBadRequest {
+	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusForbidden {
 		return fmt.Errorf("server rejected request: %s", string(respBody))
 	}
 
@@ -77,6 +77,9 @@ func (c *Client) Provision(cfg *config.Config) error {
 		case "error":
 			fmt.Fprintf(os.Stderr, "error provisioning %s: %s\n", result.Name, result.Error)
 			hasError = true
+		}
+		for _, where := range result.Idmapped {
+			fmt.Fprintf(os.Stdout, "  idmapped in %s\n", where)
 		}
 	}
 

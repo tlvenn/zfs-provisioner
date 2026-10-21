@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -16,10 +17,24 @@ const SkipEnvVar = "ZFS_SKIP_MOUNT_CHECKS"
 
 // Entry represents one mount from /proc/self/mountinfo.
 type Entry struct {
+	ID         int
+	ParentID   int
 	MountPoint string
+	Options    []string // per-mount options, e.g. "rw", "relatime", "idmapped"
 	FSType     string
 	Source     string
 	Optional   []string // propagation tags: "shared:N", "master:N", "unbindable"
+}
+
+// Idmapped reports whether the mount carries an idmap, as Incus gives the
+// mounts of shift=true disk devices.
+func (e *Entry) Idmapped() bool {
+	for _, opt := range e.Options {
+		if opt == "idmapped" {
+			return true
+		}
+	}
+	return false
 }
 
 // Shared reports whether the mount belongs to a shared peer group, meaning
@@ -27,6 +42,17 @@ type Entry struct {
 func (e *Entry) Shared() bool {
 	for _, opt := range e.Optional {
 		if strings.HasPrefix(opt, "shared:") {
+			return true
+		}
+	}
+	return false
+}
+
+// Slave reports whether the mount receives mount events from a master peer
+// group without sending its own back.
+func (e *Entry) Slave() bool {
+	for _, opt := range e.Optional {
+		if strings.HasPrefix(opt, "master:") {
 			return true
 		}
 	}
@@ -74,7 +100,17 @@ func skipRequested() bool {
 // (e.g. during development on macOS) it returns nil, nil so checks degrade
 // to no-ops.
 func Entries() ([]Entry, error) {
-	f, err := os.Open("/proc/self/mountinfo")
+	return readMountinfo("/proc/self/mountinfo")
+}
+
+// EntriesOf reads the mount table of another process, as seen from that
+// process's mount namespace (e.g. a container's init).
+func EntriesOf(pid int) ([]Entry, error) {
+	return readMountinfo(fmt.Sprintf("/proc/%d/mountinfo", pid))
+}
+
+func readMountinfo(path string) ([]Entry, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -84,6 +120,11 @@ func Entries() ([]Entry, error) {
 	defer f.Close()
 
 	return parse(f)
+}
+
+// ParseMountinfo parses mountinfo-formatted content.
+func ParseMountinfo(r io.Reader) ([]Entry, error) {
+	return parse(r)
 }
 
 // parse reads mountinfo lines. Format per proc(5):
@@ -119,8 +160,14 @@ func parse(r io.Reader) ([]Entry, error) {
 			continue
 		}
 
+		id, _ := strconv.Atoi(fields[0])
+		parentID, _ := strconv.Atoi(fields[1])
+
 		entries = append(entries, Entry{
+			ID:         id,
+			ParentID:   parentID,
 			MountPoint: unescape(fields[4]),
+			Options:    strings.Split(fields[5], ","),
 			Optional:   fields[6:sep],
 			FSType:     fields[sep+1],
 			Source:     unescape(fields[sep+2]),
@@ -168,6 +215,93 @@ func lookupExact(entries []Entry, path string) *Entry {
 		}
 	}
 	return found
+}
+
+// Visible returns the mount that path resolution actually reaches at path:
+// the top of any stack of mounts there, attached to the mount visible at the
+// enclosing level. It returns nil when no mount sits exactly at path. Unlike
+// lookupExact it ignores mounts hidden under an over-mount, and anything
+// attached to them, even though mountinfo still lists them.
+func Visible(entries []Entry, path string) *Entry {
+	ids := make(map[int]bool, len(entries))
+	children := make(map[int][]*Entry)
+	for i := range entries {
+		ids[entries[i].ID] = true
+		children[entries[i].ParentID] = append(children[entries[i].ParentID], &entries[i])
+	}
+
+	// Follow the stack of mounts at mp attached on top of cur.
+	top := func(cur *Entry, mp string) *Entry {
+		for {
+			var next *Entry
+			for _, c := range children[cur.ID] {
+				if c != cur && c.MountPoint == mp {
+					next = c
+				}
+			}
+			if next == nil {
+				return cur
+			}
+			cur = next
+		}
+	}
+
+	// The namespace root is the "/" mount whose parent lies outside it.
+	var cur *Entry
+	for i := range entries {
+		e := &entries[i]
+		if e.MountPoint == "/" && (e.ParentID == e.ID || !ids[e.ParentID]) {
+			cur = e
+		}
+	}
+	if cur == nil {
+		return nil
+	}
+	cur = top(cur, "/")
+
+	prefix := ""
+	for _, comp := range strings.Split(strings.Trim(path, "/"), "/") {
+		if comp == "" {
+			continue
+		}
+		prefix += "/" + comp
+		cur = top(cur, prefix)
+	}
+
+	if cur.MountPoint != "/"+strings.Trim(path, "/") {
+		return nil
+	}
+	return cur
+}
+
+// VerifyHostMountNamespace ensures that a process running directly on the
+// host shares the host's mount namespace. systemd's ProtectSystem=,
+// ProtectHome=, PrivateTmp= and similar settings give a service its own
+// namespace and make it a slave of the host's: every dataset the service
+// mounts then stays invisible to the host and to containers, and
+// applications write to the bare directory underneath instead.
+func VerifyHostMountNamespace() error {
+	if skipRequested() || InContainer() {
+		return nil
+	}
+
+	self, err := os.Readlink("/proc/self/ns/mnt")
+	if err != nil {
+		return nil
+	}
+	host, err := os.Readlink("/proc/1/ns/mnt")
+	if err != nil {
+		return nil
+	}
+	if self == host {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"refusing to start: this process runs in its own mount namespace (%s, host is %s), so datasets it mounts will NOT be visible on the host or in containers.\n"+
+			"If it runs under systemd, remove ProtectSystem=, ProtectHome=, PrivateTmp=, PrivateMounts= and any other setting that implies a mount namespace from the unit.\n"+
+			"Set %s=1 to bypass this check.",
+		self, host, SkipEnvVar)
 }
 
 // VerifyPropagation ensures that, when running inside a container, mounts

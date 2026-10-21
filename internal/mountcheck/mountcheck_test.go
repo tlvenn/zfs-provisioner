@@ -129,3 +129,81 @@ func TestVerifyDatasetMountedSkipsNonPathMountpoints(t *testing.T) {
 		}
 	}
 }
+
+// A container's view after a dataset was created on the host while it ran:
+// /data and /data/beszel were idmapped by Incus at start, /data/traceway
+// (and its child) arrived through propagation without an idmap, and an
+// over-mount at /data/old hides the mount that was there before.
+const containerMountinfo = `100 99 0:50 / / rw,relatime shared:1 - zfs rpool/data/incus/magelo/containers/ops rw
+110 100 0:60 / /data rw,relatime,idmapped shared:594 master:84 - zfs rpool/data/magelo/ops rw
+111 110 0:61 / /data/beszel rw,relatime,idmapped shared:595 master:102 - zfs rpool/data/magelo/ops/beszel rw
+120 110 0:70 / /data/traceway rw,relatime shared:600 master:200 - zfs rpool/data/magelo/ops/traceway rw
+121 120 0:71 / /data/traceway/data rw,relatime shared:601 master:201 - zfs rpool/data/magelo/ops/traceway/data rw
+130 110 0:80 / /data/old rw,relatime - zfs rpool/data/magelo/ops/old rw
+131 130 0:81 / /data/old/child rw,relatime - zfs rpool/data/magelo/ops/old/child rw
+132 130 0:82 / /data/old rw,relatime,idmapped - zfs rpool/data/magelo/ops/old rw
+`
+
+func TestParseIDsAndOptions(t *testing.T) {
+	entries, err := parse(strings.NewReader(containerMountinfo))
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	e := lookupExact(entries, "/data/beszel")
+	if e == nil || e.ID != 111 || e.ParentID != 110 {
+		t.Fatalf("unexpected ids for /data/beszel: %+v", e)
+	}
+	if !e.Idmapped() {
+		t.Error("expected /data/beszel to be idmapped")
+	}
+	if e := lookupExact(entries, "/data/traceway"); e == nil || e.Idmapped() {
+		t.Errorf("expected /data/traceway to be a plain propagated mount, got %+v", e)
+	}
+}
+
+func TestVisible(t *testing.T) {
+	entries, err := parse(strings.NewReader(containerMountinfo))
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	cases := map[string]int{
+		"/":                   100,
+		"/data":               110,
+		"/data/":              110,
+		"/data/beszel":        111,
+		"/data/traceway/data": 121,
+		// The over-mount wins over the mount it hides...
+		"/data/old": 132,
+	}
+	for path, want := range cases {
+		e := Visible(entries, path)
+		if e == nil || e.ID != want {
+			t.Errorf("Visible(%q): expected mount %d, got %+v", path, want, e)
+		}
+	}
+
+	// ...and children of the hidden mount are no longer reachable, although
+	// mountinfo still lists them.
+	if e := Visible(entries, "/data/old/child"); e != nil {
+		t.Errorf("expected /data/old/child to be hidden, got %+v", e)
+	}
+
+	// No mount exactly there: the path is a plain directory.
+	for _, path := range []string{"/data/beszel/sub", "/data/nothing", "/elsewhere"} {
+		if e := Visible(entries, path); e != nil {
+			t.Errorf("Visible(%q): expected nil, got %+v", path, e)
+		}
+	}
+}
+
+func TestVisibleSelfParentedRoot(t *testing.T) {
+	entries, err := parse(strings.NewReader("1 1 0:1 / / rw - rootfs rootfs rw\n2 1 0:2 / /mnt rw - zfs tank rw\n"))
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if e := Visible(entries, "/mnt"); e == nil || e.Source != "tank" {
+		t.Errorf("expected tank at /mnt, got %+v", e)
+	}
+}

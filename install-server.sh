@@ -7,11 +7,12 @@ set -euo pipefail
 #   ./install-server.sh                    # install latest release
 #   ./install-server.sh v1.0.0             # install specific release
 #   LISTEN_ADDR=0.0.0.0:9274 ./install-server.sh  # override listen address
+#   ALLOW_PARENT=rpool/data/app ./install-server.sh  # restrict provisioning to a subtree
 
 BINARY_NAME="zfs-provisioner"
 INSTALL_DIR="/usr/local/bin"
 SERVICE_NAME="zfs-provisioner"
-REPO="tlvenn/zfs_provisioner"
+REPO="tlvenn/zfs-provisioner"
 
 # Auto-detect listen addresses from Incus bridge networks.
 # Binds to each bridge IP specifically rather than 0.0.0.0 for security.
@@ -33,6 +34,7 @@ detect_listen_addr() {
 }
 
 LISTEN_ADDR="${LISTEN_ADDR:-$(detect_listen_addr)}"
+ALLOW_PARENT="${ALLOW_PARENT:-}"
 
 # Parse args
 VERSION=""
@@ -41,9 +43,16 @@ while [ $# -gt 0 ]; do
     v*) VERSION="$1"; shift ;;
     --listen) shift; LISTEN_ADDR="$1"; shift ;;
     --listen=*) LISTEN_ADDR="${1#*=}"; shift ;;
+    --allow-parent) shift; ALLOW_PARENT="$1"; shift ;;
+    --allow-parent=*) ALLOW_PARENT="${1#*=}"; shift ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
+
+SERVE_ARGS="--listen ${LISTEN_ADDR}"
+if [ -n "$ALLOW_PARENT" ]; then
+  SERVE_ARGS="${SERVE_ARGS} --allow-parent ${ALLOW_PARENT}"
+fi
 
 # Determine download URL
 if [ -n "$VERSION" ]; then
@@ -55,6 +64,7 @@ else
 fi
 
 echo "Listen address: ${LISTEN_ADDR}"
+echo "Allowed parents: ${ALLOW_PARENT:-any (set ALLOW_PARENT to restrict)}"
 
 # Download binary
 TMP=$(mktemp)
@@ -80,20 +90,21 @@ sudo mv "$TMP" "${INSTALL_DIR}/${BINARY_NAME}"
 trap - EXIT
 echo "Installed ${INSTALL_DIR}/${BINARY_NAME}"
 
-# Create/update systemd service
+# Create/update systemd service.
+#
+# No ProtectSystem=, ProtectHome=, PrivateTmp= or any other setting that gives
+# the service its own mount namespace: systemd makes that namespace a slave of
+# the host's, so the datasets the server mounts would never reach the host or
+# the containers. The server refuses to start in that situation.
 sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null <<EOF
 [Unit]
 Description=ZFS Provisioner API
 After=network.target zfs-mount.target
 
 [Service]
-ExecStart=${INSTALL_DIR}/${BINARY_NAME} serve --listen ${LISTEN_ADDR}
+ExecStart=${INSTALL_DIR}/${BINARY_NAME} serve ${SERVE_ARGS}
 Restart=always
 RestartSec=5
-ProtectSystem=full
-ProtectHome=true
-NoNewPrivileges=false
-PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
