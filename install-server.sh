@@ -8,10 +8,14 @@ set -euo pipefail
 #   ./install-server.sh v1.0.0             # install specific release
 #   LISTEN_ADDR=0.0.0.0:9274 ./install-server.sh  # override listen address
 #   ALLOW_PARENT=rpool/data/app ./install-server.sh  # restrict provisioning to a subtree
+#   SERVICE_NAME=zfs-provisioner-b LISTEN_ADDR=10.0.1.1:9274 ALLOW_PARENT=rpool/data/b ./install-server.sh
+#                                                  # another instance: one per bridge and subtree
 
 BINARY_NAME="zfs-provisioner"
 INSTALL_DIR="/usr/local/bin"
-SERVICE_NAME="zfs-provisioner"
+# Distinct names give each bridge its own server, confined to its own subtree,
+# so one project's containers cannot provision in another's. They share the binary.
+SERVICE_NAME="${SERVICE_NAME:-zfs-provisioner}"
 REPO="tlvenn/zfs-provisioner"
 
 # Auto-detect listen addresses from Incus bridge networks.
@@ -98,7 +102,7 @@ echo "Installed ${INSTALL_DIR}/${BINARY_NAME}"
 # the containers. The server refuses to start in that situation.
 sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null <<EOF
 [Unit]
-Description=ZFS Provisioner API
+Description=ZFS Provisioner API (${SERVICE_NAME})
 After=network.target zfs-mount.target
 
 [Service]
