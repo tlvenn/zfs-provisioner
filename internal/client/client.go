@@ -91,12 +91,38 @@ func (c *Client) Provision(cfg *config.Config) error {
 }
 
 // buildRequest converts a parsed Config into a ProvisionRequest for the server.
-// Reconstructs the nested dataset structure expected by the server API.
+// One parent is sent in the original form, which servers before multi-parent
+// support also accept; several are sent as parents.
 func buildRequest(cfg *config.Config) config.ProvisionRequest {
-	datasets := make(map[string]interface{})
-	parentPrefix := cfg.Parent + "/"
+	if len(cfg.Parents) == 0 {
+		return config.ProvisionRequest{Datasets: map[string]interface{}{}}
+	}
+	if len(cfg.Parents) == 1 {
+		p := cfg.Parents[0]
+		return config.ProvisionRequest{
+			Parent:   p.Parent,
+			Defaults: p.Defaults,
+			Datasets: nestDatasets(p),
+		}
+	}
 
-	for _, ds := range cfg.Datasets {
+	parents := make(map[string]config.ProvisionParent, len(cfg.Parents))
+	for _, p := range cfg.Parents {
+		parents[p.Parent] = config.ProvisionParent{
+			Defaults: p.Defaults,
+			Datasets: nestDatasets(p),
+		}
+	}
+	return config.ProvisionRequest{Parents: parents}
+}
+
+// nestDatasets rebuilds the nested dataset structure the server API expects
+// from a parent's datasets
+func nestDatasets(p config.ParentConfig) map[string]interface{} {
+	datasets := make(map[string]interface{})
+	parentPrefix := p.Parent + "/"
+
+	for _, ds := range p.Datasets {
 		if !strings.HasPrefix(ds.Name, parentPrefix) {
 			continue
 		}
@@ -119,11 +145,7 @@ func buildRequest(cfg *config.Config) config.ProvisionRequest {
 		target[parts[len(parts)-1]] = propsMap
 	}
 
-	return config.ProvisionRequest{
-		Parent:   cfg.Parent,
-		Defaults: cfg.Defaults,
-		Datasets: datasets,
-	}
+	return datasets
 }
 
 // doWithRetry sends a POST request with exponential backoff retry

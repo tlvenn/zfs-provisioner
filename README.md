@@ -91,9 +91,10 @@ Note: This requires the file to be accessible at the mount path, which may not w
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `parent` | string | yes | Parent ZFS dataset path (e.g., `tank/docker/stacks/myapp`) |
+| `parent` | string | yes, or `parents` | Parent ZFS dataset path (e.g., `tank/docker/stacks/myapp`) |
+| `parents` | object | yes, or `parent` | Several parents, each with its own `datasets` and optional `defaults`. See [Several Parents](#several-parents) |
 | `defaults` | object | no | Default properties applied to all datasets |
-| `datasets` | object | no | Dataset definitions |
+| `datasets` | object | no | Dataset definitions (with `parent` only) |
 
 #### Dataset Properties
 
@@ -153,6 +154,45 @@ datasets:
       gid: "999"
 ```
 Creates datasets with specified ownership (applied recursively via `chown -R`).
+
+#### Several Parents
+
+A stack whose volumes live in different places, such as its config on a fast pool and its media on a large one, lists each parent under `parents`, with its datasets:
+
+```yaml
+services:
+  zfs-provisioner:
+    image: ghcr.io/tlvenn/zfs-provisioner:latest
+    privileged: true
+    volumes:
+      - /dev/zfs:/dev/zfs
+      # In local mode, each parent's mountpoint, rshared
+      - /fast/apps:/fast/apps:rshared
+      - /tank/media:/tank/media:rshared
+    environment:
+      ZFS_CONFIG: |
+        defaults:
+          uid: "1000"
+          gid: "1000"
+        parents:
+          fast/apps:
+            datasets:
+              myapp:
+                config: {}
+                db:
+                  recordsize: "16K"
+          tank/media:
+            defaults:
+              recordsize: "1M"
+            datasets:
+              library: {}
+```
+Creates `fast/apps/myapp/config` and `fast/apps/myapp/db`, owned by 1000, and `tank/media/library` with a 1M record size, also owned by 1000.
+
+- **Defaults:** the top-level `defaults` apply under every parent. A parent's own `defaults` override them, and a dataset's properties override both.
+- **Order:** parents are provisioned in name order.
+- **Exclusive forms:** `parent` and `parents` can't be combined, and with `parents`, `datasets` only go under a parent.
+- **Duplicates:** a dataset that nested parents would list twice (`fast/apps` with `myapp/config`, and `fast/apps/myapp` with `config`) is refused.
 
 ### Remote Mode
 
@@ -252,6 +292,20 @@ The `serve` subcommand runs an HTTP API that accepts provisioning requests and e
 }
 ```
 
+Several parents go under `parents`, in the same shape as the [`x-zfs` form](#several-parents):
+
+```json
+{
+  "defaults": {"uid": "1000"},
+  "parents": {
+    "fast/apps": {"datasets": {"myapp": {"config": {}}}},
+    "tank/media": {"defaults": {"recordsize": "1M"}, "datasets": {"library": {}}}
+  }
+}
+```
+
+A client with a single parent sends the first form, which servers before 0.6.0 also accept. `parents` needs a 0.6.0 server: an older one refuses the request with `parent is required`, without provisioning anything.
+
 Response:
 ```json
 {
@@ -265,7 +319,7 @@ Response:
 
 Actions: `created`, `updated`, `unchanged`, `error`. Errors include an `error` field with details. `idmapped` lists the container paths where the dataset's mount was swapped for an idmapped one (see [Incus containers](#incus-containers-shifttrue)).
 
-A parent outside `--allow-parent` is refused with `403`.
+A parent outside `--allow-parent` is refused with `403`. With several parents, one outside is enough to refuse the whole request, and nothing is provisioned.
 
 **`GET /health`** — check server and ZFS availability
 
@@ -307,10 +361,10 @@ curl -fsSL https://raw.githubusercontent.com/tlvenn/zfs-provisioner/main/install
 ./install-server.sh v1.0.0
 
 # One bridge, one subtree (recommended)
-LISTEN_ADDR=172.16.0.1:9274 ALLOW_PARENT=rpool/data/magelo/ops ./install-server.sh v0.5.0
+LISTEN_ADDR=172.16.0.1:9274 ALLOW_PARENT=rpool/data/magelo/ops ./install-server.sh v0.6.0
 
 # Another bridge gets its own instance, confined to its own subtree
-SERVICE_NAME=zfs-provisioner-jumpn LISTEN_ADDR=172.16.1.1:9274 ALLOW_PARENT=rpool/data/jumpn/ops ./install-server.sh v0.5.0
+SERVICE_NAME=zfs-provisioner-jumpn LISTEN_ADDR=172.16.1.1:9274 ALLOW_PARENT=rpool/data/jumpn/ops ./install-server.sh v0.6.0
 ```
 
 The script:

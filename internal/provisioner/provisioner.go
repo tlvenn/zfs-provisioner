@@ -3,6 +3,7 @@ package provisioner
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/tlvenn/zfs-provisioner/internal/config"
 )
@@ -37,7 +38,7 @@ func New(backend Backend, dryRun, verbose bool, output io.Writer) *Provisioner {
 // Returns an error on the first dataset that fails.
 func (p *Provisioner) Provision(cfg *config.Config) error {
 	if p.verbose {
-		fmt.Fprintf(p.output, "provisioning datasets under %s\n", cfg.Parent)
+		fmt.Fprintf(p.output, "provisioning datasets under %s\n", strings.Join(cfg.ParentNames(), ", "))
 	}
 
 	results := p.ProvisionWithResults(cfg)
@@ -54,7 +55,7 @@ func (p *Provisioner) Provision(cfg *config.Config) error {
 func (p *Provisioner) ProvisionWithResults(cfg *config.Config) []config.DatasetResult {
 	var results []config.DatasetResult
 
-	for _, dataset := range cfg.Datasets {
+	for _, dataset := range cfg.AllDatasets() {
 		results = append(results, p.provisionDataset(dataset))
 	}
 

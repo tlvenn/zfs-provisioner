@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -26,18 +27,50 @@ type Dataset struct {
 	Properties ZFSProperties `json:"properties"`
 }
 
-// Config represents the parsed x-zfs configuration
+// Config represents the parsed x-zfs configuration: datasets under one or more parents
 type Config struct {
+	Parents []ParentConfig `json:"parents"`
+}
+
+// ParentConfig is a parent dataset and the datasets to provision under it
+type ParentConfig struct {
 	Parent   string        `json:"parent"`
 	Defaults ZFSProperties `json:"defaults,omitempty"`
 	Datasets []Dataset     `json:"datasets"`
 }
 
-// ProvisionRequest is the HTTP API request for provisioning
+// AllDatasets returns the datasets of every parent, parent by parent
+func (c *Config) AllDatasets() []Dataset {
+	var all []Dataset
+	for _, p := range c.Parents {
+		all = append(all, p.Datasets...)
+	}
+	return all
+}
+
+// ParentNames returns the parent datasets, in order
+func (c *Config) ParentNames() []string {
+	names := make([]string, 0, len(c.Parents))
+	for _, p := range c.Parents {
+		names = append(names, p.Parent)
+	}
+	return names
+}
+
+// ProvisionRequest is the HTTP API request for provisioning: the x-zfs
+// configuration as JSON, with either a parent or parents
 type ProvisionRequest struct {
-	Parent   string                 `json:"parent"`
+	Parent   string                     `json:"parent,omitempty"`
+	Defaults ZFSProperties              `json:"defaults,omitempty"`
+	Datasets map[string]interface{}     `json:"datasets,omitempty"`
+	Parents  map[string]ProvisionParent `json:"parents,omitempty"`
+}
+
+// ProvisionParent is one parent of a multi-parent request. Its defaults
+// override the request's.
+type ProvisionParent struct {
 	Defaults ZFSProperties          `json:"defaults,omitempty"`
-	Datasets map[string]interface{} `json:"datasets"`
+	Datasets map[string]interface{} `json:"datasets,omitempty"`
 }
 
 // ProvisionResponse is the HTTP API response for provisioning requests
@@ -108,44 +141,126 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("x-zfs must be a map")
 	}
 
-	config := &Config{}
-
-	// Parse parent
-	if parent, ok := xzfsMap["parent"].(string); ok {
-		config.Parent = parent
-	} else {
-		return nil, fmt.Errorf("x-zfs.parent is required")
-	}
-
-	// Parse defaults
-	if defaults, ok := xzfsMap["defaults"].(map[string]interface{}); ok {
-		parsed, err := parseProperties(defaults)
+	// Parse defaults, shared by every parent
+	var defaults ZFSProperties
+	if d, ok := xzfsMap["defaults"].(map[string]interface{}); ok {
+		parsed, err := parseProperties(d)
 		if err != nil {
 			return nil, fmt.Errorf("x-zfs.defaults: %w", err)
 		}
-		config.Defaults = parsed
+		defaults = parsed
 	}
 
-	// Parse datasets
-	if datasets, ok := xzfsMap["datasets"].(map[string]interface{}); ok {
-		parsed, err := parseDatasets(config.Parent, config.Defaults, datasets)
+	_, hasParent := xzfsMap["parent"]
+	parents, hasParents := xzfsMap["parents"]
+	if hasParent && hasParents {
+		return nil, fmt.Errorf("x-zfs.parent and x-zfs.parents are exclusive: list every parent under parents")
+	}
+
+	config := &Config{}
+
+	if !hasParents {
+		parent, ok := xzfsMap["parent"].(string)
+		if !ok {
+			return nil, fmt.Errorf("x-zfs.parent (or x-zfs.parents) is required")
+		}
+		datasets, _ := xzfsMap["datasets"].(map[string]interface{})
+		pc, err := buildParent(parent, defaults, datasets)
 		if err != nil {
 			return nil, err
 		}
-		config.Datasets = parsed
+		config.Parents = []ParentConfig{pc}
+		return config, nil
 	}
 
+	// Several parents, each with its own defaults and datasets
+	if _, ok := xzfsMap["datasets"]; ok {
+		return nil, fmt.Errorf("x-zfs.datasets goes under each parent when x-zfs.parents is set")
+	}
+	parentsMap, ok := parents.(map[string]interface{})
+	if !ok || len(parentsMap) == 0 {
+		return nil, fmt.Errorf("x-zfs.parents must map each parent dataset to its datasets")
+	}
+	for _, name := range sortedKeys(parentsMap) {
+		entry, ok := parentsMap[name].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("x-zfs.parents.%s must be a map with datasets (and optional defaults)", name)
+		}
+		for key := range entry {
+			if key != "defaults" && key != "datasets" {
+				return nil, fmt.Errorf("x-zfs.parents.%s: unknown key %q (expected defaults or datasets)", name, key)
+			}
+		}
+
+		parentDefaults := defaults
+		if d, ok := entry["defaults"].(map[string]interface{}); ok {
+			parsed, err := parseProperties(d)
+			if err != nil {
+				return nil, fmt.Errorf("x-zfs.parents.%s.defaults: %w", name, err)
+			}
+			parentDefaults = mergeProperties(defaults, parsed)
+		}
+
+		datasets, _ := entry["datasets"].(map[string]interface{})
+		pc, err := buildParent(name, parentDefaults, datasets)
+		if err != nil {
+			return nil, err
+		}
+		config.Parents = append(config.Parents, pc)
+	}
+
+	if err := checkDuplicates(config); err != nil {
+		return nil, err
+	}
 	return config, nil
 }
 
-// BuildConfig creates a Config from structured inputs, reusing the dataset parser.
+// BuildConfig creates a Config from an HTTP API request, reusing the dataset parser.
 // Used by the HTTP server to avoid JSON-to-YAML roundtrip.
-func BuildConfig(parent string, defaults ZFSProperties, datasets map[string]interface{}) (*Config, error) {
-	if parent == "" {
-		return nil, fmt.Errorf("parent is required")
+func BuildConfig(req ProvisionRequest) (*Config, error) {
+	if req.Parent != "" && len(req.Parents) > 0 {
+		return nil, fmt.Errorf("parent and parents are exclusive: list every parent under parents")
 	}
 
-	cfg := &Config{
+	cfg := &Config{}
+
+	if len(req.Parents) == 0 {
+		if req.Parent == "" {
+			return nil, fmt.Errorf("parent is required")
+		}
+		pc, err := buildParent(req.Parent, req.Defaults, req.Datasets)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Parents = []ParentConfig{pc}
+		return cfg, nil
+	}
+
+	if len(req.Datasets) > 0 {
+		return nil, fmt.Errorf("datasets go under each parent when parents is set")
+	}
+	for _, name := range sortedKeys(req.Parents) {
+		p := req.Parents[name]
+		pc, err := buildParent(name, mergeProperties(req.Defaults, p.Defaults), p.Datasets)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Parents = append(cfg.Parents, pc)
+	}
+
+	if err := checkDuplicates(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// buildParent parses the datasets under one parent
+func buildParent(parent string, defaults ZFSProperties, datasets map[string]interface{}) (ParentConfig, error) {
+	if parent == "" {
+		return ParentConfig{}, fmt.Errorf("parent is required")
+	}
+
+	pc := ParentConfig{
 		Parent:   parent,
 		Defaults: defaults,
 	}
@@ -153,12 +268,38 @@ func BuildConfig(parent string, defaults ZFSProperties, datasets map[string]inte
 	if len(datasets) > 0 {
 		parsed, err := parseDatasets(parent, defaults, datasets)
 		if err != nil {
-			return nil, err
+			return ParentConfig{}, err
 		}
-		cfg.Datasets = parsed
+		pc.Datasets = parsed
 	}
 
-	return cfg, nil
+	return pc, nil
+}
+
+// checkDuplicates refuses a dataset listed under two parents, which nested
+// parents (rpool/apps and rpool/apps/app) make possible
+func checkDuplicates(cfg *Config) error {
+	seen := make(map[string]string)
+	for _, p := range cfg.Parents {
+		for _, ds := range p.Datasets {
+			if prev, ok := seen[ds.Name]; ok {
+				return fmt.Errorf("dataset %s is listed under both %s and %s", ds.Name, prev, p.Parent)
+			}
+			seen[ds.Name] = p.Parent
+		}
+	}
+	return nil
+}
+
+// sortedKeys returns a map's keys in order, so parents are provisioned in a
+// stable order
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // parseDatasets recursively parses dataset definitions, supporting both simple and nested forms

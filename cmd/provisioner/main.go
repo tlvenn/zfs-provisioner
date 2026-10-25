@@ -123,9 +123,13 @@ func runProvision(args []string) {
 	backend := zfs.NewClient(*dryRun)
 
 	// In local mode this process performs the zfs mounts itself, so when it
-	// runs inside a container the parent mountpoint must have shared
+	// runs inside a container each parent's mountpoint must have shared
 	// propagation for those mounts to reach the host.
-	if mp, err := backend.NearestMountpoint(cfg.Parent); err == nil && strings.HasPrefix(mp, "/") {
+	for _, parent := range cfg.ParentNames() {
+		mp, err := backend.NearestMountpoint(parent)
+		if err != nil || !strings.HasPrefix(mp, "/") {
+			continue
+		}
 		if err := mountcheck.VerifyPropagation(mp); err != nil {
 			if *dryRun {
 				fmt.Fprintf(os.Stderr, "warning: %v\n", err)

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -38,17 +39,17 @@ services:
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	if cfg.Parent != "tank/docker/stacks/myapp" {
-		t.Errorf("Parent = %q, want %q", cfg.Parent, "tank/docker/stacks/myapp")
+	if cfg.Parents[0].Parent != "tank/docker/stacks/myapp" {
+		t.Errorf("Parent = %q, want %q", cfg.Parents[0].Parent, "tank/docker/stacks/myapp")
 	}
 
-	if cfg.Defaults.Compression != "zstd" {
-		t.Errorf("Defaults.Compression = %q, want %q", cfg.Defaults.Compression, "zstd")
+	if cfg.Parents[0].Defaults.Compression != "zstd" {
+		t.Errorf("Defaults.Compression = %q, want %q", cfg.Parents[0].Defaults.Compression, "zstd")
 	}
 
 	// Build a map for easier lookup
 	datasets := make(map[string]Dataset)
-	for _, ds := range cfg.Datasets {
+	for _, ds := range cfg.AllDatasets() {
 		datasets[ds.Name] = ds
 	}
 
@@ -102,9 +103,9 @@ services:
 
 	// Count total datasets
 	expectedCount := 6 // redis, postgres/data, postgres/wal, app/config, app/data, app/logs
-	if len(cfg.Datasets) != expectedCount {
-		t.Errorf("len(Datasets) = %d, want %d", len(cfg.Datasets), expectedCount)
-		for _, ds := range cfg.Datasets {
+	if len(cfg.AllDatasets()) != expectedCount {
+		t.Errorf("len(Datasets) = %d, want %d", len(cfg.AllDatasets()), expectedCount)
+		for _, ds := range cfg.AllDatasets() {
 			t.Logf("  - %s", ds.Name)
 		}
 	}
@@ -153,17 +154,17 @@ datasets:
 		t.Fatalf("ParseEnv failed: %v", err)
 	}
 
-	if cfg.Parent != "tank/docker/stacks/myapp" {
-		t.Errorf("Parent = %q, want %q", cfg.Parent, "tank/docker/stacks/myapp")
+	if cfg.Parents[0].Parent != "tank/docker/stacks/myapp" {
+		t.Errorf("Parent = %q, want %q", cfg.Parents[0].Parent, "tank/docker/stacks/myapp")
 	}
 
-	if cfg.Defaults.Compression != "zstd" {
-		t.Errorf("Defaults.Compression = %q, want %q", cfg.Defaults.Compression, "zstd")
+	if cfg.Parents[0].Defaults.Compression != "zstd" {
+		t.Errorf("Defaults.Compression = %q, want %q", cfg.Parents[0].Defaults.Compression, "zstd")
 	}
 
 	// Build a map for easier lookup
 	datasets := make(map[string]Dataset)
-	for _, ds := range cfg.Datasets {
+	for _, ds := range cfg.AllDatasets() {
 		datasets[ds.Name] = ds
 	}
 
@@ -208,7 +209,7 @@ x-zfs:
 
 	// Build a map for easier lookup
 	datasets := make(map[string]Dataset)
-	for _, ds := range cfg.Datasets {
+	for _, ds := range cfg.AllDatasets() {
 		datasets[ds.Name] = ds
 	}
 
@@ -236,9 +237,9 @@ x-zfs:
 
 	// Count total datasets
 	expectedCount := 3 // redis, cache, postgres/data
-	if len(cfg.Datasets) != expectedCount {
-		t.Errorf("len(Datasets) = %d, want %d", len(cfg.Datasets), expectedCount)
-		for _, ds := range cfg.Datasets {
+	if len(cfg.AllDatasets()) != expectedCount {
+		t.Errorf("len(Datasets) = %d, want %d", len(cfg.AllDatasets()), expectedCount)
+		for _, ds := range cfg.AllDatasets() {
 			t.Logf("  - %s", ds.Name)
 		}
 	}
@@ -264,16 +265,16 @@ x-zfs:
 	}
 
 	// Check defaults are parsed
-	if cfg.Defaults.UID != "1000" {
-		t.Errorf("Defaults.UID = %q, want %q", cfg.Defaults.UID, "1000")
+	if cfg.Parents[0].Defaults.UID != "1000" {
+		t.Errorf("Defaults.UID = %q, want %q", cfg.Parents[0].Defaults.UID, "1000")
 	}
-	if cfg.Defaults.GID != "1000" {
-		t.Errorf("Defaults.GID = %q, want %q", cfg.Defaults.GID, "1000")
+	if cfg.Parents[0].Defaults.GID != "1000" {
+		t.Errorf("Defaults.GID = %q, want %q", cfg.Parents[0].Defaults.GID, "1000")
 	}
 
 	// Build a map for easier lookup
 	datasets := make(map[string]Dataset)
-	for _, ds := range cfg.Datasets {
+	for _, ds := range cfg.AllDatasets() {
 		datasets[ds.Name] = ds
 	}
 
@@ -330,7 +331,7 @@ x-zfs:
 
 	// Build a map for easier lookup
 	datasets := make(map[string]Dataset)
-	for _, ds := range cfg.Datasets {
+	for _, ds := range cfg.AllDatasets() {
 		datasets[ds.Name] = ds
 	}
 
@@ -380,7 +381,7 @@ x-zfs:
 
 	// Build a map for easier lookup
 	datasets := make(map[string]Dataset)
-	for _, ds := range cfg.Datasets {
+	for _, ds := range cfg.AllDatasets() {
 		datasets[ds.Name] = ds
 	}
 
@@ -443,7 +444,7 @@ x-zfs:
 	}
 
 	datasets := make(map[string]Dataset)
-	for _, ds := range cfg.Datasets {
+	for _, ds := range cfg.AllDatasets() {
 		datasets[ds.Name] = ds
 	}
 
@@ -472,7 +473,7 @@ x-zfs:
 
 	// Build a map for easier lookup
 	datasets := make(map[string]Dataset)
-	for _, ds := range cfg.Datasets {
+	for _, ds := range cfg.AllDatasets() {
 		datasets[ds.Name] = ds
 	}
 
@@ -485,6 +486,180 @@ x-zfs:
 		}
 		if redis.Properties.GID != "1000" {
 			t.Errorf("redis.GID = %q, want %q", redis.Properties.GID, "1000")
+		}
+	}
+}
+
+func TestParse_Parents(t *testing.T) {
+	yaml := `
+x-zfs:
+  defaults:
+    uid: "1000"
+    gid: "1000"
+  parents:
+    rpool/apps:
+      datasets:
+        uchiyomi:
+          data: {}
+          config: {}
+    data/media:
+      defaults:
+        recordsize: "1M"
+        uid: "568"
+      datasets:
+        manga: {}
+`
+
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Parents come in name order, whatever the YAML's order
+	names := cfg.ParentNames()
+	if len(names) != 2 || names[0] != "data/media" || names[1] != "rpool/apps" {
+		t.Fatalf("ParentNames() = %v, want [data/media rpool/apps]", names)
+	}
+	if want := (ZFSProperties{Recordsize: "1M", UID: "568", GID: "1000"}); cfg.Parents[0].Defaults != want {
+		t.Errorf("data/media defaults = %+v, want %+v", cfg.Parents[0].Defaults, want)
+	}
+
+	want := map[string]ZFSProperties{
+		"rpool/apps/uchiyomi/data":   {UID: "1000", GID: "1000"},
+		"rpool/apps/uchiyomi/config": {UID: "1000", GID: "1000"},
+		"data/media/manga":           {Recordsize: "1M", UID: "568", GID: "1000"},
+	}
+	got := cfg.AllDatasets()
+	if len(got) != len(want) {
+		t.Fatalf("len(AllDatasets()) = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for _, ds := range got {
+		if props, ok := want[ds.Name]; !ok {
+			t.Errorf("unexpected dataset %s", ds.Name)
+		} else if ds.Properties != props {
+			t.Errorf("%s properties = %+v, want %+v", ds.Name, ds.Properties, props)
+		}
+	}
+}
+
+func TestParse_ParentsErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		xzfs string
+		want string
+	}{
+		{"parent and parents", `
+  parent: "tank/a"
+  parents:
+    tank/b:
+      datasets:
+        x: {}`, "exclusive"},
+		{"datasets at the top", `
+  datasets:
+    x: {}
+  parents:
+    tank/b:
+      datasets:
+        y: {}`, "goes under each parent"},
+		{"no parents", `
+  parents: {}`, "must map each parent"},
+		{"parent not a map", `
+  parents:
+    tank/b: "x"`, "must be a map"},
+		{"unknown key", `
+  parents:
+    tank/b:
+      dataset:
+        x: {}`, "unknown key"},
+		{"bad parent defaults", `
+  parents:
+    tank/b:
+      defaults:
+        uid: "abc"
+      datasets:
+        x: {}`, "x-zfs.parents.tank/b.defaults"},
+		{"dataset under two parents", `
+  parents:
+    rpool/apps:
+      datasets:
+        app:
+          data: {}
+    rpool/apps/app:
+      datasets:
+        data: {}`, "listed under both"},
+	}
+
+	for _, tc := range cases {
+		_, err := Parse([]byte("x-zfs:" + tc.xzfs + "\n"))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error = %v, want one containing %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestParseEnv_Parents(t *testing.T) {
+	value := `parents:
+  rpool/apps:
+    datasets:
+      app: {}
+  data/media:
+    datasets:
+      library: {}`
+
+	cfg, err := ParseEnv(value)
+	if err != nil {
+		t.Fatalf("ParseEnv failed: %v", err)
+	}
+	if len(cfg.AllDatasets()) != 2 {
+		t.Errorf("len(AllDatasets()) = %d, want 2", len(cfg.AllDatasets()))
+	}
+}
+
+func TestBuildConfig_Parents(t *testing.T) {
+	cfg, err := BuildConfig(ProvisionRequest{
+		Defaults: ZFSProperties{Compression: "zstd"},
+		Parents: map[string]ProvisionParent{
+			"tank/b": {Defaults: ZFSProperties{Quota: "1G"}, Datasets: map[string]interface{}{"x": map[string]interface{}{}}},
+			"tank/a": {Datasets: map[string]interface{}{"y": map[string]interface{}{"quota": "5G"}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildConfig failed: %v", err)
+	}
+
+	if names := cfg.ParentNames(); len(names) != 2 || names[0] != "tank/a" || names[1] != "tank/b" {
+		t.Fatalf("ParentNames() = %v, want [tank/a tank/b]", names)
+	}
+	want := map[string]ZFSProperties{
+		"tank/a/y": {Compression: "zstd", Quota: "5G"},
+		"tank/b/x": {Compression: "zstd", Quota: "1G"},
+	}
+	for _, ds := range cfg.AllDatasets() {
+		if ds.Properties != want[ds.Name] {
+			t.Errorf("%s properties = %+v, want %+v", ds.Name, ds.Properties, want[ds.Name])
+		}
+	}
+}
+
+func TestBuildConfig_Errors(t *testing.T) {
+	cases := []struct {
+		name string
+		req  ProvisionRequest
+		want string
+	}{
+		{"neither", ProvisionRequest{}, "parent is required"},
+		{"both", ProvisionRequest{Parent: "tank/a", Parents: map[string]ProvisionParent{"tank/b": {}}}, "exclusive"},
+		{"datasets at the top", ProvisionRequest{
+			Datasets: map[string]interface{}{"x": map[string]interface{}{}},
+			Parents:  map[string]ProvisionParent{"tank/b": {}},
+		}, "under each parent"},
+		{"empty parent name", ProvisionRequest{Parents: map[string]ProvisionParent{"": {}}}, "parent is required"},
+	}
+
+	for _, tc := range cases {
+		_, err := BuildConfig(tc.req)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error = %v, want one containing %q", tc.name, err, tc.want)
 		}
 	}
 }

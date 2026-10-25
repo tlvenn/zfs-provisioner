@@ -282,6 +282,62 @@ func TestHandleProvision_AllowedParents(t *testing.T) {
 	}
 }
 
+func TestHandleProvision_Parents(t *testing.T) {
+	backend := newMockBackend()
+	srv := New(backend, WithAllowedParents([]string{"rpool/apps", "data/media"}))
+
+	w, resp := provision(t, srv, `{
+		"defaults": {"uid": "1000"},
+		"parents": {
+			"rpool/apps": {"datasets": {"uchiyomi": {"data": {}, "config": {}}}},
+			"data/media": {"defaults": {"recordsize": "1M"}, "datasets": {"manga": {}}}
+		}
+	}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", w.Code, w.Body.String())
+	}
+	if len(resp.Results) != 3 {
+		t.Fatalf("len(results) = %d, want 3: %+v", len(resp.Results), resp.Results)
+	}
+
+	want := map[string]config.ZFSProperties{
+		"rpool/apps/uchiyomi/data":   {UID: "1000"},
+		"rpool/apps/uchiyomi/config": {UID: "1000"},
+		"data/media/manga":           {UID: "1000", Recordsize: "1M"},
+	}
+	for name, props := range want {
+		if got, ok := backend.datasets[name]; !ok {
+			t.Errorf("backend missing dataset: %s", name)
+		} else if got != props {
+			t.Errorf("%s properties = %+v, want %+v", name, got, props)
+		}
+	}
+}
+
+func TestHandleProvision_ParentsOneForbidden(t *testing.T) {
+	backend := newMockBackend()
+	srv := New(backend, WithAllowedParents([]string{"rpool/apps"}))
+
+	w, _ := provision(t, srv, `{"parents": {
+		"rpool/apps": {"datasets": {"app": {}}},
+		"data/media": {"datasets": {"manga": {}}}
+	}}`)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	// Refused as a whole: not even the allowed parent's datasets
+	if len(backend.datasets) != 0 {
+		t.Errorf("rejected request still provisioned %v", backend.datasets)
+	}
+}
+
+func TestHandleProvision_ParentAndParents(t *testing.T) {
+	w, _ := provision(t, New(newMockBackend()), `{"parent": "tank/a", "parents": {"tank/b": {}}}`)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
 type fakeRepairer struct {
 	instancesErr error
 	fixed        map[string][]string

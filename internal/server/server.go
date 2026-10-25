@@ -89,26 +89,35 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := config.BuildConfig(req.Parent, req.Defaults, req.Datasets)
+	cfg, err := config.BuildConfig(req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
-	if status, err := s.checkParent(cfg.Parent); err != nil {
-		s.logger.Printf("provision rejected from %s: %v", r.RemoteAddr, err)
-		writeJSON(w, status, map[string]string{"error": err.Error()})
-		return
+	// Every parent must be allowed before anything is provisioned
+	parents := cfg.ParentNames()
+	for _, parent := range parents {
+		if status, err := s.checkParent(parent); err != nil {
+			s.logger.Printf("provision rejected from %s: %v", r.RemoteAddr, err)
+			writeJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
-	s.logger.Printf("provisioning %d datasets under %s", len(cfg.Datasets), cfg.Parent)
+	datasets := cfg.AllDatasets()
+	s.logger.Printf("provisioning %d datasets under %s", len(datasets), strings.Join(parents, ", "))
 
 	// The server performs the zfs mounts, so if it is itself containerized
-	// its parent mountpoint needs shared propagation to reach the host.
+	// each parent's mountpoint needs shared propagation to reach the host.
 	if resolver, ok := s.backend.(interface {
 		NearestMountpoint(string) (string, error)
 	}); ok {
-		if mp, err := resolver.NearestMountpoint(cfg.Parent); err == nil && strings.HasPrefix(mp, "/") {
+		for _, parent := range parents {
+			mp, err := resolver.NearestMountpoint(parent)
+			if err != nil || !strings.HasPrefix(mp, "/") {
+				continue
+			}
 			if err := mountcheck.VerifyPropagation(mp); err != nil {
 				s.logger.Printf("provision rejected: %v", err)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
